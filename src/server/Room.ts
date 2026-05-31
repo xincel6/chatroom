@@ -25,6 +25,14 @@ export class Room {
         if (this.users.size >= this.maxUsers) {
             return false; // 房间已满
         }
+        if (this.users.has(user.nickname)) {
+            return false; // 用户已在房间内
+        }
+        if(user.isMuted()) {
+            user.sendSystemMessage(`你已被禁言，无法加入房间 ${this.name}`);
+            return false;
+        }
+        
         this.users.add(user.nickname);
         return true;
     }

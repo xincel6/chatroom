@@ -21,10 +21,11 @@ export class User {
     role: UserRole;
     metadata: UserMetadata;
     isAuthenticated: boolean = false;
-    mutedUnixTime: number = 0;     // 禁言截止时间（秒级时间戳）
+    mutedUnixTime: number = 0;     // 禁言截止时间（时间戳）
     missedPings: number = 0;
     currentRoom: string = '';
     databaseUserId: number = 0;    // 关联 users.json 中的 id，0 表示未关联（游客）
+    kickRoom = new Map<string, number>(); // 记录被踢出房间的截止时间
 
     constructor(socket: Socket, role: UserRole = UserRole.MEMBER) {
         this.nickname = '';
@@ -88,9 +89,35 @@ export class User {
         return Date.now() / 1000 < this.mutedUnixTime;
     }
 
-    /** 禁言用户（分钟） */
-    mute(minutes: number): void {
-        this.mutedUnixTime = Date.now() / 1000 + minutes * 60;
+    /** 禁言用户（秒） */
+    mute(seconds: number): void {
+        this.mutedUnixTime = Date.now() / 1000 + seconds;
+    }
+
+    isKickFromRoom(roomName: string): boolean {
+        const kickUntil = this.kickRoom.get(roomName);
+        if (!kickUntil) return false;
+        if (Date.now() / 1000 > kickUntil) {
+            this.kickRoom.delete(roomName); // 已过期，移除记录
+            return false;
+        }
+        return true;
+    }
+
+    /** 踢出用户（秒） */
+    kickFromRoom(roomName: string, seconds: number): void {
+        const kickUntil = Date.now() / 1000 + seconds;
+        this.kickRoom.set(roomName, kickUntil);
+    }
+
+     /** 解除踢出 */
+     unkickFromRoom(roomName: string): void {
+        this.kickRoom.delete(roomName);
+    }
+
+     /** 解除禁言 */
+     unmute(): void {
+        this.mutedUnixTime = 0;
     }
 
     /** 检查心跳是否超时（传入毫秒） */

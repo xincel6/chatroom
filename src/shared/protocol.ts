@@ -22,6 +22,13 @@ export enum MessageType{
     CMD_RESULT = 'CMD_RESULT' ,//命令执行结果
     //命令相关
 
+    MUTE = 'MUTE'             ,//禁言用户
+    UNMUTE = 'UNMUTE'         ,//解除禁言
+    KICK = 'KICK'             ,//踢出用户
+    BAN = 'BAN'               ,//封禁用户
+    UNBAN = 'UNBAN'           ,//解除封禁
+    //管理操作
+
     PING = 'PING'             ,//服务端心跳
     PONG = 'PONG'             ,//客户端心跳
     //心跳相关
@@ -312,6 +319,24 @@ export interface PresenceMessage extends BaseMessage {
   };
 }
 
+
+
+
+
+
+/** 通用命令消息（管理操作统一通道） */
+export interface CommandMessage extends BaseMessage {
+  type: MessageType.COMMAND;
+  payload: {
+    command: string;
+    target?: string;
+    room?: string;
+    duration?: number;
+    role?: string;
+    keyword?: string;
+  };
+}
+
 import { v4 as uuidv4 } from 'uuid';
 export function generateUniqueId(): string {
   return uuidv4();
@@ -403,6 +428,11 @@ export function isErrorMessage(msg: BaseMessage): msg is ErrorMessage {
   return msg.type === MessageType.ERROR;
 }
 
+// 命令相关
+export function isCommandMessage(msg: BaseMessage): msg is CommandMessage {
+  return msg.type === MessageType.COMMAND;
+}
+
 // === 新增类型守卫 ===
 export function isRegisterMessage(msg: BaseMessage): msg is RegisterMessage {
   return msg.type === MessageType.REGISTER;
@@ -416,3 +446,4 @@ export function isTokenMessage(msg: BaseMessage): msg is TokenMessage {
 export function isHistoryMessage(msg: BaseMessage): msg is HistoryMessage {
   return msg.type === MessageType.HISTORY;
 }
+

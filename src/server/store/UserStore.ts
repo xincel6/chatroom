@@ -100,4 +100,26 @@ export class UserStore extends BaseStore<UsersData> {
   getAll(): UserRecord[] {
     return [...this.data.users];
   }
+
+  /** 删除用户 */
+  delete(userId: number): boolean {
+    const idx = this.data.users.findIndex(u => u.id === userId);
+    if (idx === -1) return false;
+    const user = this.data.users[idx];
+    this.data.users.splice(idx, 1);
+    this.indexByUsername.delete(user.username);
+    this.indexByNickname.delete(user.nickname);
+    this.indexById.delete(user.id);
+    this.scheduleWrite();
+    return true;
+  }
+
+  /** 更新用户角色 */
+  updateRole(userId: number, role: UserRecord['role']): boolean {
+    const user = this.indexById.get(userId);
+    if (!user) return false;
+    user.role = role;
+    this.scheduleWrite();
+    return true;
+  }
 }

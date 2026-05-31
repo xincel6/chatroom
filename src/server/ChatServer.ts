@@ -161,10 +161,184 @@ export class ChatServer {
             await this.handleWhisper(user, msg as WhisperMessage);
         } else if (isHistoryMessage(msg)) {
             this.handleHistory(user, msg as HistoryMessage);
+        } else if (msg.type === MessageType.COMMAND) {
+            this.handleCommand(user, msg);
         } else {
             user.sendSystemMessage('未知消息类型！');
         }
     }
+    private handleCommand(user: User, msg: BaseMessage): void {
+        if (user.role === UserRole.MEMBER) {
+            user.sendSystemMessage('你没有权限执行此操作！');
+            return;
+        }
+        const payload = msg.payload as any;
+        const cmd = payload.command;
+        switch (cmd) {
+            case 'kick': {
+                const target = payload.target;
+                const roomName = payload.room;
+                const duration = payload.duration || 300;
+                const targetUser = this.nicknames.get(target);
+                if (!targetUser) {
+                    user.sendSystemMessage('目标用户不存在！');
+                    return;
+                }
+                const room = this.rooms.get(roomName);
+                if (!room) {
+                    user.sendSystemMessage('目标房间不存在！');
+                    return;
+                }
+                if (!room.getUserList().includes(targetUser.nickname)) {
+                    user.sendSystemMessage('目标用户不在房间内！');
+                    return;
+                }
+                targetUser.kickFromRoom(roomName, duration);
+                room.removeUser(targetUser);
+                this.broadcast(roomName, {
+                    type: MessageType.PRESENCE,
+                    payload: { nickname: targetUser.nickname, action: 'leave', room: roomName },
+                    timestamp: new Date().toISOString(),
+                    sender: 'system',
+                    id: uuidv4()
+                } as BaseMessage);
+                targetUser.sendSystemMessage(`你被管理员 ${user.nickname} 踢出房间 ${roomName}，禁止加入 ${duration} 秒！`);
+                user.sendSystemMessage(`已将 ${target} 踢出房间 ${roomName}`);
+                break;
+            }
+            case 'ban': {
+                const target = payload.target;
+                const duration = payload.duration || 86400;
+                const targetUser = this.nicknames.get(target);
+                if (!targetUser) {
+                    user.sendSystemMessage('目标用户不存在！');
+                    return;
+                }
+                targetUser.kickRoom.set('global', Date.now() / 1000 + duration);
+                targetUser.sendSystemMessage(`你被管理员 ${user.nickname} 封禁账号，禁止登录 ${duration} 秒！`);
+                if (targetUser.socket && !targetUser.socket.destroyed) {
+                    targetUser.socket.destroy();
+                }
+                user.sendSystemMessage(`已封禁 ${target}`);
+                break;
+            }
+            case 'unban': {
+                const target = payload.target;
+                const targetUser = this.nicknames.get(target);
+                if (!targetUser) {
+                    user.sendSystemMessage('目标用户不存在！');
+                    return;
+                }
+                targetUser.kickRoom.delete('global');
+                targetUser.sendSystemMessage(`你已被管理员 ${user.nickname} 解除封禁`);
+                user.sendSystemMessage(`已解除 ${target} 的封禁`);
+                break;
+            }
+            case 'mute': {
+                const target = payload.target;
+                const duration = payload.duration || 0;
+                const targetUser = this.nicknames.get(target);
+                if (!targetUser) {
+                    user.sendSystemMessage('目标用户不存在！');
+                    return;
+                }
+                targetUser.mute(duration);
+                targetUser.sendSystemMessage(`你被管理员 ${user.nickname} 禁言 ${duration} 秒！`);
+                user.sendSystemMessage(`已禁言 ${target} ${duration} 秒`);
+                break;
+            }
+            case 'unmute': {
+                const target = payload.target;
+                const targetUser = this.nicknames.get(target);
+                if (!targetUser) {
+                    user.sendSystemMessage('目标用户不存在！');
+                    return;
+                }
+                targetUser.unmute();
+                targetUser.sendSystemMessage(`你已被管理员 ${user.nickname} 解除禁言`);
+                user.sendSystemMessage(`已解除 ${target} 的禁言`);
+                break;
+            }
+            case 'deuser': {
+                const target = payload.target;
+                const targetUser = this.nicknames.get(target);
+                const dbUser = this.store.users.findByNickname(target);
+                if (dbUser) {
+                    this.store.users.delete(dbUser.id);
+                }
+                if (targetUser) {
+                    targetUser.sendSystemMessage(`你已被管理员 ${user.nickname} 删除账号`);
+                    targetUser.socket.destroy();
+                }
+                user.sendSystemMessage(`已删除用户 ${target}`);
+                break;
+            }
+            case 'search': {
+                const room = payload.room;
+                const keyword = payload.keyword;
+                const results = this.store.messages.search(room, keyword, 20);
+                if (results.length === 0) {
+                    user.sendSystemMessage(`房间 ${room} 中没有找到包含 "${keyword}" 的消息`);
+                } else {
+                    user.sendSystemMessage(`=== 房间 ${room} 的搜索结果 ===`);
+                    for (const r of results) {
+                        const time = new Date(r.createdAt * 1000).toLocaleTimeString();
+                        user.sendSystemMessage(`[${time}] ${r.senderName}: ${r.content}`);
+                    }
+                    user.sendSystemMessage(`=== 共 ${results.length} 条结果 ===`);
+                }
+                break;
+            }
+            case 'role': {
+                const target = payload.target;
+                const newRole = payload.role;
+                if (!['MEMBER', 'ADMIN', 'MODERATOR'].includes(newRole)) {
+                    user.sendSystemMessage('无效的角色');
+                    return;
+                }
+                const dbUser = this.store.users.findByNickname(target);
+                if (dbUser) {
+                    this.store.users.updateRole(dbUser.id, newRole);
+                }
+                const targetUser = this.nicknames.get(target);
+                if (targetUser) {
+                    targetUser.role = newRole as UserRole;
+                    targetUser.sendSystemMessage(`你的角色已被管理员 ${user.nickname} 修改为 ${newRole}`);
+                }
+                user.sendSystemMessage(`已修改 ${target} 的角色为 ${newRole}`);
+                break;
+            }
+            case 'deroom': {
+                const roomName = payload.room;
+                if (roomName === 'Lobby') {
+                    user.sendSystemMessage('不能删除默认房间 Lobby');
+                    return;
+                }
+                const room = this.rooms.get(roomName);
+                if (!room) {
+                    user.sendSystemMessage('房间不存在');
+                    return;
+                }
+                // 将房间内所有用户移回 Lobby
+                const lobby = this.rooms.get('Lobby')!;
+                for (const nickname of room.getUserList()) {
+                    const u = this.nicknames.get(nickname);
+                    if (!u) continue;
+                    room.removeUser(u);
+                    lobby.addUser(u);
+                    u.currentRoom = 'Lobby';
+                    u.sendSystemMessage(`房间 ${roomName} 已被管理员 ${user.nickname} 删除，你已返回 Lobby`);
+                }
+                this.rooms.delete(roomName);
+                this.store.rooms.delete(roomName);
+                user.sendSystemMessage(`已删除房间 ${roomName}`);
+                break;
+            }
+            default:
+                user.sendSystemMessage(`未知命令: ${cmd}`);
+        }
+    }
+
 
     private handleAuth(user: User, msg: AuthMessage): void {
         const nickname = msg.payload.nickname.trim();
