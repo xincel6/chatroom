@@ -1,7 +1,7 @@
 import { ChatClient } from './client';
 
-const HOST = process.env.CHAT_CLIENT_HOST || 'localhost';
-const PORT = parseInt(process.env.CHAT_CLIENT_PORT || '3000', 10);
+const HOST = process.env.CHAT_CLIENT_HOST || 'frp-put.com';
+const PORT = parseInt(process.env.CHAT_CLIENT_PORT || '17863', 10);
 
 try {
     new ChatClient(HOST, PORT);
