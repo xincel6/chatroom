@@ -34,7 +34,24 @@ export enum MessageType{
     ERROR = 'ERROR'           ,//错误消息
     //状态
 
+    // === 新增：注册登录体系 ===
+    REGISTER = 'REGISTER',           // 注册请求
+    REGISTER_OK = 'REGISTER_OK',     // 注册成功
+    REGISTER_FAIL = 'REGISTER_FAIL', // 注册失败
 
+    LOGIN = 'LOGIN',                 // 登录请求
+    LOGIN_OK = 'LOGIN_OK',           // 登录成功（返回 Token）
+    LOGIN_FAIL = 'LOGIN_FAIL',       // 登录失败
+
+    TOKEN = 'TOKEN',                 // Token 认证（替代旧 AUTH）
+    TOKEN_OK = 'TOKEN_OK',
+    TOKEN_FAIL = 'TOKEN_FAIL',
+
+    HISTORY = 'HISTORY',             // 请求历史消息
+    HISTORY_DATA = 'HISTORY_DATA',   // 历史消息响应
+
+    SYNC = 'SYNC',                   // 云端同步请求
+    SYNC_OK = 'SYNC_OK',             // 同步成功
 }
 
 /** 统一消息接口 */
@@ -184,6 +201,107 @@ export interface ErrorMessage extends BaseMessage {
   payload: { code: string; message: string };
 }
 
+// === 新增：注册登录相关消息接口 ===
+
+/** 注册请求 */
+export interface RegisterMessage extends BaseMessage {
+  type: MessageType.REGISTER;
+  payload: {
+    username: string;      // 登录用户名（英文+数字，3-20位）
+    password: string;      // 密码（6-32位）
+    nickname: string;      // 显示昵称（1-20位）
+  };
+}
+
+/** 注册响应 */
+export interface RegisterOkMessage extends BaseMessage {
+  type: MessageType.REGISTER_OK;
+  payload: {
+    userId: number;
+    username: string;
+    nickname: string;
+  };
+}
+export interface RegisterFailMessage extends BaseMessage {
+  type: MessageType.REGISTER_FAIL;
+  payload: { reason: string };
+}
+
+/** 登录请求 */
+export interface LoginMessage extends BaseMessage {
+  type: MessageType.LOGIN;
+  payload: {
+    username: string;
+    password: string;
+  };
+}
+
+/** 登录响应 */
+export interface LoginOkMessage extends BaseMessage {
+  type: MessageType.LOGIN_OK;
+  payload: {
+    token: string;          // JWT Token
+    expiresAt: number;      // 过期时间戳
+    user: {
+      id: number;
+      username: string;
+      nickname: string;
+      role: string;
+    };
+  };
+}
+export interface LoginFailMessage extends BaseMessage {
+  type: MessageType.LOGIN_FAIL;
+  payload: { reason: string };
+}
+
+/** Token 认证（重新连接时使用） */
+export interface TokenMessage extends BaseMessage {
+  type: MessageType.TOKEN;
+  payload: {
+    token: string;          // 之前登录获取的 JWT Token
+  };
+}
+
+/** Token 认证成功 */
+export interface TokenOkMessage extends BaseMessage {
+  type: MessageType.TOKEN_OK;
+  payload: {
+    nickname: string;
+    room: string;
+  };
+}
+
+/** Token 认证失败 */
+export interface TokenFailMessage extends BaseMessage {
+  type: MessageType.TOKEN_FAIL;
+  payload: { reason: string };
+}
+
+/** 历史消息请求 */
+export interface HistoryMessage extends BaseMessage {
+  type: MessageType.HISTORY;
+  payload: {
+    room: string;
+    beforeId?: number;      // 游标分页：从此 ID 之前加载
+    limit?: number;         // 默认 20，最大 100
+  };
+}
+
+/** 历史消息响应 */
+export interface HistoryDataMessage extends BaseMessage {
+  type: MessageType.HISTORY_DATA;
+  payload: {
+    messages: {
+      id: number;
+      sender: string;
+      content: string;
+      createdAt: number;
+    }[];
+    hasMore: boolean;        // 是否还有更多消息
+  };
+}
+
 /**用户上下线通知（PRESENCE）*/
 export interface PresenceMessage extends BaseMessage {
   type: MessageType.PRESENCE;
@@ -283,4 +401,18 @@ export function isPresenceMessage(msg: BaseMessage): msg is PresenceMessage {
 
 export function isErrorMessage(msg: BaseMessage): msg is ErrorMessage {
   return msg.type === MessageType.ERROR;
+}
+
+// === 新增类型守卫 ===
+export function isRegisterMessage(msg: BaseMessage): msg is RegisterMessage {
+  return msg.type === MessageType.REGISTER;
+}
+export function isLoginMessage(msg: BaseMessage): msg is LoginMessage {
+  return msg.type === MessageType.LOGIN;
+}
+export function isTokenMessage(msg: BaseMessage): msg is TokenMessage {
+  return msg.type === MessageType.TOKEN;
+}
+export function isHistoryMessage(msg: BaseMessage): msg is HistoryMessage {
+  return msg.type === MessageType.HISTORY;
 }

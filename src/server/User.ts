@@ -24,6 +24,7 @@ export class User {
     mutedUnixTime: number = 0;     // 禁言截止时间（秒级时间戳）
     missedPings: number = 0;
     currentRoom: string = '';
+    databaseUserId: number = 0;    // 关联 users.json 中的 id，0 表示未关联（游客）
 
     constructor(socket: Socket, role: UserRole = UserRole.MEMBER) {
         this.nickname = '';

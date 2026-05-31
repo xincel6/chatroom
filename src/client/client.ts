@@ -1,6 +1,11 @@
 import { createConnection, Socket } from 'net';
 import * as readline from 'readline';
-import { BaseMessage, MessageType, AuthMessage, ChatMessage, WhisperMessage, JoinMessage } from '../shared/protocol';
+import {
+    BaseMessage, MessageType, AuthMessage, ChatMessage, WhisperMessage, JoinMessage,
+    RegisterMessage, LoginMessage, HistoryMessage,
+    RegisterOkMessage, RegisterFailMessage, LoginOkMessage, LoginFailMessage,
+    TokenOkMessage, TokenFailMessage, HistoryDataMessage
+} from '../shared/protocol';
 import { v4 as uuidv4 } from 'uuid';
 
 export class ChatClient {
@@ -10,6 +15,8 @@ export class ChatClient {
     private currentRoom: string = 'Lobby';
     private buffer: string = '';
     private chatStarted: boolean = false;
+    private token: string = '';
+    private lastHistoryId: number | null = null;
 
     constructor(host: string, port: number) {
         this.socket = createConnection({ host, port });
@@ -25,7 +32,7 @@ export class ChatClient {
     private setupSocket(): void {
         this.socket.on('connect', () => {
             console.log('✅ 已连接到服务器');
-            this.promptNickname();
+            this.promptAuthChoice();
         });
 
         this.socket.on('data', (chunk: Buffer) => {
@@ -56,16 +63,64 @@ export class ChatClient {
         });
     }
 
-    private promptNickname(): void {
+    private promptAuthChoice(): void {
         if ((this.rl as any).closed) return;
+        this.rl.question('选择操作: [1]登录 [2]注册 [3]游客登录 > ', (choice) => {
+            switch (choice.trim()) {
+                case '1': this.promptLogin(); break;
+                case '2': this.promptRegister(); break;
+                case '3': this.promptGuestLogin(); break;
+                default:
+                    console.log('无效选项');
+                    this.promptAuthChoice();
+            }
+        });
+    }
+
+    private promptLogin(): void {
+        this.rl.question('用户名: ', (username) => {
+            this.rl.question('密码: ', (password) => {
+                const login: LoginMessage = {
+                    type: MessageType.LOGIN,
+                    payload: { username: username.trim(), password },
+                    timestamp: new Date().toISOString(),
+                    sender: '',
+                    id: uuidv4()
+                };
+                this.send(login);
+            });
+        });
+    }
+
+    private promptRegister(): void {
+        this.rl.question('用户名 (3-20位字母/数字/下划线): ', (username) => {
+            this.rl.question('密码 (6-32位): ', (password) => {
+                this.rl.question('昵称 (1-20位): ', (nickname) => {
+                    const register: RegisterMessage = {
+                        type: MessageType.REGISTER,
+                        payload: {
+                            username: username.trim(),
+                            password,
+                            nickname: nickname.trim()
+                        },
+                        timestamp: new Date().toISOString(),
+                        sender: '',
+                        id: uuidv4()
+                    };
+                    this.send(register);
+                });
+            });
+        });
+    }
+
+    private promptGuestLogin(): void {
         this.rl.question('请输入昵称: ', (name) => {
             const trimmed = name.trim();
             if (!trimmed) {
                 console.log('昵称不能为空');
-                this.promptNickname();
+                this.promptGuestLogin();
                 return;
             }
-
             this.nickname = trimmed;
             const auth: AuthMessage = {
                 type: MessageType.AUTH,
@@ -157,6 +212,36 @@ export class ChatClient {
                 this.send(join);
                 break;
 
+            case 'history':
+                const history: HistoryMessage = {
+                    type: MessageType.HISTORY,
+                    payload: { room: this.currentRoom, limit: 20 },
+                    timestamp: new Date().toISOString(),
+                    sender: this.nickname,
+                    id: uuidv4()
+                };
+                this.send(history);
+                break;
+
+            case 'more':
+                if (this.lastHistoryId !== null) {
+                    const more: HistoryMessage = {
+                        type: MessageType.HISTORY,
+                        payload: {
+                            room: this.currentRoom,
+                            beforeId: this.lastHistoryId,
+                            limit: 20
+                        },
+                        timestamp: new Date().toISOString(),
+                        sender: this.nickname,
+                        id: uuidv4()
+                    };
+                    this.send(more);
+                } else {
+                    console.log('请先使用 /history 加载历史消息');
+                }
+                break;
+
             default:
                 console.log('未知命令:', cmd);
         }
@@ -172,7 +257,63 @@ export class ChatClient {
 
             case MessageType.AUTH_FAIL:
                 console.log('❌ 认证失败:', (msg as any).payload?.reason || '未知原因');
-                this.promptNickname();
+                this.promptGuestLogin();
+                break;
+
+            case MessageType.REGISTER_OK:
+                const rOk = msg as RegisterOkMessage;
+                console.log(`🎉 注册成功！欢迎 ${rOk.payload.nickname}`);
+                break;
+
+            case MessageType.REGISTER_FAIL:
+                const rFail = msg as RegisterFailMessage;
+                console.log('❌ 注册失败:', rFail.payload.reason);
+                this.promptAuthChoice();
+                break;
+
+            case MessageType.LOGIN_OK:
+                const lOk = msg as LoginOkMessage;
+                this.token = lOk.payload.token;
+                this.nickname = lOk.payload.user.nickname;
+                console.log(`🎉 登录成功！欢迎 ${lOk.payload.user.nickname}`);
+                this.startChat();
+                break;
+
+            case MessageType.LOGIN_FAIL:
+                const lFail = msg as LoginFailMessage;
+                console.log('❌ 登录失败:', lFail.payload.reason);
+                this.promptAuthChoice();
+                break;
+
+            case MessageType.TOKEN_OK:
+                const tOk = msg as TokenOkMessage;
+                this.nickname = tOk.payload.nickname;
+                console.log('🎉 Token 认证成功！');
+                this.startChat();
+                break;
+
+            case MessageType.TOKEN_FAIL:
+                console.log('❌ Token 已过期，请重新登录');
+                this.promptAuthChoice();
+                break;
+
+            case MessageType.HISTORY_DATA:
+                const h = msg as HistoryDataMessage;
+                if (h.payload.messages.length === 0) {
+                    console.log('--- 没有更多历史消息 ---');
+                } else {
+                    for (const m of h.payload.messages) {
+                        const time = new Date(m.createdAt * 1000).toLocaleTimeString();
+                        console.log(`[${time}] ${m.sender}: ${m.content}`);
+                    }
+                    if (h.payload.hasMore) {
+                        this.lastHistoryId = h.payload.messages[h.payload.messages.length - 1].id;
+                        console.log('--- 输入 /more 加载更多 ---');
+                    } else {
+                        this.lastHistoryId = null;
+                        console.log('--- 已加载全部历史消息 ---');
+                    }
+                }
                 break;
 
             case MessageType.CHAT:
