@@ -173,6 +173,17 @@ export class ChatClient {
         const cmd = parts[0].toLowerCase();
 
         switch (cmd) {
+            case 'help':
+            case 'h':
+                console.log('可用命令:');
+                console.log('  /help, /h              显示帮助');
+                console.log('  /quit, /q              退出客户端');
+                console.log('  /w <昵称> <内容>        发送私聊');
+                console.log('  /join <房间名> [密码]   加入或创建房间');
+                console.log('  /history               加载当前房间历史消息');
+                console.log('  /more                  加载更多历史消息');
+                break;
+
             case 'quit':
             case 'q':
                 this.socket.end();
@@ -202,6 +213,8 @@ export class ChatClient {
                     break;
                 }
                 const roomName = parts[1];
+                this.currentRoom = roomName;
+                this.rl.setPrompt(`${this.nickname}[${this.currentRoom}]> `);
                 const join: JoinMessage = {
                     type: MessageType.JOIN,
                     payload: { room: roomName },
@@ -352,6 +365,20 @@ export class ChatClient {
 
             default:
                 break;
+        }
+
+        // 如果正在聊天模式且收到展示类消息，恢复 readline 提示符
+        if (this.chatStarted) {
+            switch (msg.type) {
+                case MessageType.CHAT:
+                case MessageType.WHISPER:
+                case MessageType.SYSTEM:
+                case MessageType.PRESENCE:
+                case MessageType.ERROR:
+                case MessageType.HISTORY_DATA:
+                    this.rl.prompt();
+                    break;
+            }
         }
     }
 
