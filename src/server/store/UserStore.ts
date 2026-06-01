@@ -11,6 +11,7 @@ export class UserStore extends BaseStore<UsersData> {
   private indexByUsername: Map<string, UserRecord> = new Map();
   private indexByNickname: Map<string, UserRecord> = new Map();
   private indexById: Map<number, UserRecord> = new Map();
+  private indexByEmail: Map<string, UserRecord> = new Map();
 
   constructor(filePath: string) {
     super(filePath, { version: 1, lastId: 0, users: [] });
@@ -23,6 +24,9 @@ export class UserStore extends BaseStore<UsersData> {
       this.indexByUsername.set(user.username, user);
       this.indexByNickname.set(user.nickname, user);
       this.indexById.set(user.id, user);
+      if (user.email) {
+        this.indexByEmail.set(user.email, user);
+      }
     }
   }
 
@@ -34,6 +38,7 @@ export class UserStore extends BaseStore<UsersData> {
       username: input.username,
       passwordHash: input.passwordHash,
       nickname: input.nickname,
+      email: input.email || '',
       role: input.role || 'MEMBER',
       createdAt: input.createdAt || Math.floor(Date.now() / 1000),
       lastLoginAt: null,
@@ -44,6 +49,9 @@ export class UserStore extends BaseStore<UsersData> {
     this.indexByUsername.set(user.username, user);
     this.indexByNickname.set(user.nickname, user);
     this.indexById.set(user.id, user);
+    if (user.email) {
+      this.indexByEmail.set(user.email, user);
+    }
     this.scheduleWrite();
     return user;
   }
@@ -121,5 +129,15 @@ export class UserStore extends BaseStore<UsersData> {
     user.role = role;
     this.scheduleWrite();
     return true;
+  }
+
+  /** 检查邮箱是否已存在 */
+  emailExists(email: string): boolean {
+    return this.indexByEmail.has(email);
+  }
+
+  /** 根据邮箱查找用户 */
+  findByEmail(email: string): UserRecord | undefined {
+    return this.indexByEmail.get(email);
   }
 }
