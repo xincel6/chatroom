@@ -7,7 +7,6 @@ export interface UserRecord {
   username: string;
   passwordHash: string;
   nickname: string;
-  email: string;
   role: UserRole;
   createdAt: number;       // Unix 秒级时间戳
   lastLoginAt: number | null;

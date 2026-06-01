@@ -4,8 +4,8 @@ import { Room } from "./Room";
 import { 
     BaseMessage, MessageType, AuthMessage, ChatMessage, WhisperMessage, JoinMessage,
     isAuthMessage, isChatMessage, isJoinMessage, isPongMessage, isWhisperMessage,
-    isRegisterMessage, isLoginMessage, isTokenMessage, isHistoryMessage, isSendVerifyMessage,
-    RegisterMessage, LoginMessage, TokenMessage, HistoryMessage, SendVerifyMessage
+    isRegisterMessage, isLoginMessage, isTokenMessage, isHistoryMessage,
+    RegisterMessage, LoginMessage, TokenMessage, HistoryMessage
 } from '../shared/protocol';
 import { v4 as uuidv4 } from 'uuid';
 import { StoreManager } from './store/StoreManager';
@@ -131,10 +131,6 @@ export class ChatServer {
 
     private async handleMessage(user: User, msg: BaseMessage): Promise<void> {
         if (!user.isAuthenticated) {
-            if (isSendVerifyMessage(msg)) {
-                await this.handleSendVerify(user, msg as SendVerifyMessage);
-                return;
-            }
             if (isRegisterMessage(msg)) {
                 await this.handleRegister(user, msg as RegisterMessage);
                 return;
@@ -384,35 +380,10 @@ export class ChatServer {
         } as BaseMessage, user);
     }
 
-    /** 处理发送验证码请求 */
-    private async handleSendVerify(user: User, msg: SendVerifyMessage): Promise<void> {
-        const { email, action } = msg.payload;
-        const result = await this.authManager.getVerifyCodeService().sendCode(email, action);
-
-        if (!result.success) {
-            user.sendMessage({
-                type: MessageType.VERIFY_FAIL,
-                payload: { username: '', action, reason: result.error! },
-                timestamp: new Date().toISOString(),
-                sender: 'system',
-                id: uuidv4()
-            } as BaseMessage);
-            return;
-        }
-
-        user.sendMessage({
-            type: MessageType.VERIFY_OK,
-            payload: { username: '', action },
-            timestamp: new Date().toISOString(),
-            sender: 'system',
-            id: uuidv4()
-        } as BaseMessage);
-    }
-
     /** 处理注册请求 */
     private async handleRegister(user: User, msg: RegisterMessage): Promise<void> {
-        const { username, password, nickname, email, verifyCode } = msg.payload;
-        const result = await this.authManager.register(username, password, nickname, email, verifyCode);
+        const { username, password, nickname } = msg.payload;
+        const result = await this.authManager.register(username, password, nickname);
 
         if (!result.success) {
             user.sendMessage({

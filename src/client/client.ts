@@ -18,7 +18,6 @@ export class ChatClient {
     private chatStarted: boolean = false;
     private token: string = '';
     private lastHistoryId: number | null = null;
-    private pendingEmail: string = ''; // 注册时暂存邮箱
 
     constructor(host: string, port: number) {
         this.socket = createConnection({ host, port });
@@ -116,31 +115,28 @@ export class ChatClient {
     }
 
     private promptRegister(): void {
-        this.rl.question('邮箱: ', (email) => {
-            const trimmedEmail = email.trim();
-            if (!trimmedEmail) {
+        this.rl.question("邮箱：", (email) => {
+            if(!email.trim()){
                 console.log('邮箱不能为空');
                 this.promptRegister();
-                return;
-            }
-            if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
+            }else if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())){
                 console.log('邮箱格式不正确');
                 this.promptRegister();
-                return;
             }
-            this.pendingEmail = trimmedEmail;
-            const verifyMsg: SendVerifyMessage = {
-                type: MessageType.SEND_VERIFY,
-                payload: {
-                    action: 'register',
-                    email: trimmedEmail
-                },
-                timestamp: new Date().toISOString(),
-                sender: '',
-                id: uuidv4()
-            };
-            this.send(verifyMsg);
-        });
+            else{
+                const verifyMsg: SendVerifyMessage = {
+                    type: MessageType.SEND_VERIFY,
+                    payload: {
+                        action: 'register',
+                        email: email.trim()
+                    },
+                    timestamp: new Date().toISOString(),
+                    sender: '',
+                    id: uuidv4()
+                };
+                this.send(verifyMsg);
+            }
+        })
     }
 
     private promptGuestLogin(): void {
@@ -591,27 +587,23 @@ export class ChatClient {
                 break;
 
             case MessageType.VERIFY_OK:
-                console.log('验证码已发送，请检查你的邮箱');
+                console.log('验证码发送成功，请检查你的邮箱');
                 this.rl.question('请输入验证码: ', (code) => {
                     this.rl.question('请输入用户名: ', (username) => {
                         this.rl.question('请输入密码: ', (password) => {
-                            this.rl.question('请输入昵称: ', (nickname) => {
-                                const registerMsg: RegisterMessage = {
-                                    type: MessageType.REGISTER,
-                                    payload: {
-                                        username: username.trim(),
-                                        password,
-                                        nickname: nickname.trim() || username.trim(),
-                                        email: this.pendingEmail,
-                                        verifyCode: code.trim()
-                                    },
-                                    timestamp: new Date().toISOString(),
-                                    sender: '',
-                                    id: uuidv4()
-                                };
-                                this.send(registerMsg);
-                                this.pendingEmail = '';
-                            });
+                            const registerMsg: RegisterMessage = {
+                                type: MessageType.REGISTER,
+                                payload: {
+                                    username: username.trim(),
+                                    password,
+                                    nickname: username.trim(),
+                                    email: ''
+                                },
+                                timestamp: new Date().toISOString(),
+                                sender: '',
+                                id: uuidv4()
+                            };
+                            this.send(registerMsg);
                         });
                     });
                 });

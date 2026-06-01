@@ -223,8 +223,7 @@ export interface RegisterMessage extends BaseMessage {
     username: string;      // 登录用户名（英文+数字，3-20位）
     password: string;      // 密码（6-32位）
     nickname: string;      // 显示昵称（1-20位）
-    email: string;         // 注册邮箱
-    verifyCode: string;    // 邮箱验证码
+    email: string;       // 可选，注册时可能需要
   };
 }
 
