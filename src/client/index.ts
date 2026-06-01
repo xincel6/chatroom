@@ -1,7 +1,7 @@
 import { ChatClient } from './client';
 
-const HOST = process.env.CHAT_CLIENT_HOST || '127.0.0.1';
-const PORT = parseInt(process.env.CHAT_CLIENT_PORT || '3000', 10);
+const HOST = process.env.CHAT_CLIENT_HOST || '47.95.232.197';  // ← 改成你的公网IP
+const PORT = parseInt(process.env.CHAT_CLIENT_PORT || '3000', 10); // ← 端口不变
 
 try {
     new ChatClient(HOST, PORT);

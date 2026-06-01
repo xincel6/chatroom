@@ -4,7 +4,8 @@ import {
     BaseMessage, MessageType, AuthMessage, ChatMessage, WhisperMessage, JoinMessage,
     RegisterMessage, LoginMessage, HistoryMessage,
     RegisterOkMessage, RegisterFailMessage, LoginOkMessage, LoginFailMessage,
-    TokenOkMessage, TokenFailMessage, HistoryDataMessage
+    TokenOkMessage, TokenFailMessage, HistoryDataMessage,
+    SendVerifyMessage
 } from '../shared/protocol';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -17,6 +18,7 @@ export class ChatClient {
     private chatStarted: boolean = false;
     private token: string = '';
     private lastHistoryId: number | null = null;
+    private pendingEmail: string = ''; // 注册时暂存邮箱
 
     constructor(host: string, port: number) {
         this.socket = createConnection({ host, port });
@@ -114,24 +116,30 @@ export class ChatClient {
     }
 
     private promptRegister(): void {
-        this.rl.question('用户名 (3-20位字母/数字/下划线): ', (username) => {
-            this.rl.question('密码 (6-32位): ', (password) => {
-                this.rl.question('昵称 (1-20位): ', (nickname) => {
-                    const register: RegisterMessage = {
-                        type: MessageType.REGISTER,
-                        payload: {
-                            username: username.trim(),
-                            password,
-                            nickname: nickname.trim()
-                        },
-                        timestamp: new Date().toISOString(),
-                        sender: '',
-                        id: uuidv4()
-                    };
-                    this.send(register);
-                    //一个回调地狱但是这里的输入流程比较简单，暂时不需要引入额外库来优化，可以接受
-                });
-            });
+        this.rl.question('邮箱: ', (email) => {
+            const trimmedEmail = email.trim();
+            if (!trimmedEmail) {
+                console.log('邮箱不能为空');
+                this.promptRegister();
+                return;
+            }
+            if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
+                console.log('邮箱格式不正确');
+                this.promptRegister();
+                return;
+            }
+            this.pendingEmail = trimmedEmail;
+            const verifyMsg: SendVerifyMessage = {
+                type: MessageType.SEND_VERIFY,
+                payload: {
+                    action: 'register',
+                    email: trimmedEmail
+                },
+                timestamp: new Date().toISOString(),
+                sender: '',
+                id: uuidv4()
+            };
+            this.send(verifyMsg);
         });
     }
 
@@ -582,6 +590,37 @@ export class ChatClient {
                 console.log(`\n[Error] ${(msg as any).payload?.message || ''}`);
                 break;
 
+            case MessageType.VERIFY_OK:
+                console.log('验证码已发送，请检查你的邮箱');
+                this.rl.question('请输入验证码: ', (code) => {
+                    this.rl.question('请输入用户名: ', (username) => {
+                        this.rl.question('请输入密码: ', (password) => {
+                            this.rl.question('请输入昵称: ', (nickname) => {
+                                const registerMsg: RegisterMessage = {
+                                    type: MessageType.REGISTER,
+                                    payload: {
+                                        username: username.trim(),
+                                        password,
+                                        nickname: nickname.trim() || username.trim(),
+                                        email: this.pendingEmail,
+                                        verifyCode: code.trim()
+                                    },
+                                    timestamp: new Date().toISOString(),
+                                    sender: '',
+                                    id: uuidv4()
+                                };
+                                this.send(registerMsg);
+                                this.pendingEmail = '';
+                            });
+                        });
+                    });
+                });
+                break;
+
+            case MessageType.VERIFY_FAIL:
+                console.log('验证码发送失败:', (msg as any).payload?.reason || '未知原因');
+                this.promptAuthChoice();
+                break;
             default:
                 break;
         }

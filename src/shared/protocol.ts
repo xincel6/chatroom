@@ -57,8 +57,14 @@ export enum MessageType{
     HISTORY = 'HISTORY',             // 请求历史消息
     HISTORY_DATA = 'HISTORY_DATA',   // 历史消息响应
 
+    SEND_VERIFY = 'SEND_VERIFY',       // 发送验证码（注册/重置密码）
+    VERIFY_OK = 'VERIFY_OK',           // 验证码验证成功
+    VERIFY_FAIL = 'VERIFY_FAIL',       // 验证码验证失败
+
+
     SYNC = 'SYNC',                   // 云端同步请求
     SYNC_OK = 'SYNC_OK',             // 同步成功
+    //画饼还没写
 }
 
 /** 统一消息接口 */
@@ -217,6 +223,8 @@ export interface RegisterMessage extends BaseMessage {
     username: string;      // 登录用户名（英文+数字，3-20位）
     password: string;      // 密码（6-32位）
     nickname: string;      // 显示昵称（1-20位）
+    email: string;         // 注册邮箱
+    verifyCode: string;    // 邮箱验证码
   };
 }
 
@@ -337,6 +345,31 @@ export interface CommandMessage extends BaseMessage {
   };
 }
 
+export  interface SendVerifyMessage extends BaseMessage {
+  type: MessageType.SEND_VERIFY;
+  payload: {
+    action: 'register' | 'reset';
+    email: string; // 可选，重置密码时可能需要
+  };
+}
+
+export interface VerifyOkMessage extends BaseMessage {
+  type: MessageType.VERIFY_OK;
+  payload: {
+    username: string;
+    action: 'register' | 'reset';
+  };
+}
+
+export interface VerifyFailMessage extends BaseMessage {
+  type: MessageType.VERIFY_FAIL;
+  payload: {
+    username: string;
+    action: 'register' | 'reset';
+    reason: string;
+  };
+}
+
 import { v4 as uuidv4 } from 'uuid';
 export function generateUniqueId(): string {
   return uuidv4();
@@ -447,3 +480,14 @@ export function isHistoryMessage(msg: BaseMessage): msg is HistoryMessage {
   return msg.type === MessageType.HISTORY;
 }
 
+export function isSendVerifyMessage(msg: BaseMessage): msg is SendVerifyMessage {
+  return msg.type === MessageType.SEND_VERIFY;
+}
+
+export function isVerifyOkMessage(msg: BaseMessage): msg is VerifyOkMessage {
+  return msg.type === MessageType.VERIFY_OK;
+}
+
+export function isVerifyFailMessage(msg: BaseMessage): msg is VerifyFailMessage {
+  return msg.type === MessageType.VERIFY_FAIL;
+}
