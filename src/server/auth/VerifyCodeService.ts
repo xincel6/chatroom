@@ -1,4 +1,4 @@
-import { EmailService } from '../server/mail';
+import { EmailService } from '../mail';
 
 interface VerifyCodeEntry {
   code: string;
@@ -24,12 +24,19 @@ export class VerifyCodeService {
       return { success: false, error: '邮箱格式不正确' };
     }
 
+    // TODO: 当 action === 'reset' 时，需要校验该邮箱是否已注册
+    // 1. 可在此注入 UserStore 或通过参数传入校验结果
+    // 2. 若邮箱未绑定任何账号，返回错误提示"该邮箱未注册"
+    // 这样可避免恶意用户对任意邮箱发送重置验证码
+
     const code = this.generateCode();
     const expiresAt = Math.floor((Date.now() + this.CODE_TTL_MS) / 1000);
+    //存储验证码和相关信息，等待后续验证时使用
 
     try {
       await this.emailService.sendVerifyCode(email, code);
       this.store.set(email, { code, email, action, expiresAt });
+      //顺手存储一下，方便后续验证
       return { success: true };
     } catch (err: any) {
       return { success: false, error: `邮件发送失败: ${err.message}` };

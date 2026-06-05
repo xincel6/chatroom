@@ -61,6 +61,10 @@ export enum MessageType{
     VERIFY_OK = 'VERIFY_OK',           // 验证码验证成功
     VERIFY_FAIL = 'VERIFY_FAIL',       // 验证码验证失败
 
+    RESET_PASSWORD = 'RESET_PASSWORD',         // 重置密码请求
+    RESET_PASSWORD_OK = 'RESET_PASSWORD_OK',   // 重置密码成功
+    RESET_PASSWORD_FAIL = 'RESET_PASSWORD_FAIL', // 重置密码失败
+
 
     SYNC = 'SYNC',                   // 云端同步请求
     SYNC_OK = 'SYNC_OK',             // 同步成功
@@ -370,6 +374,33 @@ export interface VerifyFailMessage extends BaseMessage {
   };
 }
 
+/** 重置密码请求 */
+export interface ResetPasswordMessage extends BaseMessage {
+  type: MessageType.RESET_PASSWORD;
+  payload: {
+    email: string;         // 注册邮箱
+    verifyCode: string;    // 邮箱验证码
+    newPassword: string;   // 新密码
+  };
+}
+
+/** 重置密码成功响应 */
+export interface ResetPasswordOkMessage extends BaseMessage {
+  type: MessageType.RESET_PASSWORD_OK;
+  payload: {
+    username: string;
+    message: string;
+  };
+}
+
+/** 重置密码失败响应 */
+export interface ResetPasswordFailMessage extends BaseMessage {
+  type: MessageType.RESET_PASSWORD_FAIL;
+  payload: {
+    reason: string;
+  };
+}
+
 import { v4 as uuidv4 } from 'uuid';
 export function generateUniqueId(): string {
   return uuidv4();
@@ -490,4 +521,8 @@ export function isVerifyOkMessage(msg: BaseMessage): msg is VerifyOkMessage {
 
 export function isVerifyFailMessage(msg: BaseMessage): msg is VerifyFailMessage {
   return msg.type === MessageType.VERIFY_FAIL;
+}
+
+export function isResetPasswordMessage(msg: BaseMessage): msg is ResetPasswordMessage {
+  return msg.type === MessageType.RESET_PASSWORD;
 }

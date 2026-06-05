@@ -140,4 +140,21 @@ export class UserStore extends BaseStore<UsersData> {
   findByEmail(email: string): UserRecord | undefined {
     return this.indexByEmail.get(email);
   }
+
+  /** 更新用户密码 */
+  updatePassword(userId: number, newPasswordHash: string): boolean {
+    // TODO: 实现逻辑
+    // 1. 通过 indexById 查找用户
+    // 2. 若用户不存在返回 false
+    // 3. 更新 user.passwordHash = newPasswordHash
+    // 4. 调用 scheduleWrite() 触发持久化
+    // 5. 返回 true
+    const user = this.indexById.get(userId);
+    if(user == undefined) return false;
+
+    user.passwordHash = newPasswordHash;
+
+    this.scheduleWrite();
+    return true;
+  }
 }

@@ -5,7 +5,8 @@ import {
     RegisterMessage, LoginMessage, HistoryMessage,
     RegisterOkMessage, RegisterFailMessage, LoginOkMessage, LoginFailMessage,
     TokenOkMessage, TokenFailMessage, HistoryDataMessage,
-    SendVerifyMessage
+    SendVerifyMessage, VerifyOkMessage,
+    ResetPasswordMessage, ResetPasswordOkMessage, ResetPasswordFailMessage
 } from '../shared/protocol';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -87,11 +88,12 @@ export class ChatClient {
 
     private promptAuthChoice(): void {
         if ((this.rl as any).closed) return;
-        this.rl.question('选择操作: [1]登录 [2]注册 [3]游客登录 > ', (choice) => {
+        this.rl.question('选择操作: [1]登录 [2]注册 [3]游客登录 [4]找回密码 > ', (choice) => {
             switch (choice.trim()) {
                 case '1': this.promptLogin(); break;
                 case '2': this.promptRegister(); break;
                 case '3': this.promptGuestLogin(); break;
+                case '4': this.promptForgotPassword(); break;
                 default:
                     console.log('无效选项');
                     this.promptAuthChoice();
@@ -160,6 +162,34 @@ export class ChatClient {
                 id: uuidv4()
             };
             this.send(auth);
+        });
+    }
+
+    private promptForgotPassword(): void {
+        this.rl.question('请输入注册邮箱: ', (email) => {
+            const trimmedEmail = email.trim();
+            if (!trimmedEmail) {
+                console.log('邮箱不能为空');
+                this.promptForgotPassword();
+                return;
+            }
+            if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
+                console.log('邮箱格式不正确');
+                this.promptForgotPassword();
+                return;
+            }
+            this.pendingEmail = trimmedEmail;
+            const verifyMsg: SendVerifyMessage = {
+                type: MessageType.SEND_VERIFY,
+                payload: {
+                    action: 'reset',
+                    email: trimmedEmail
+                },
+                timestamp: new Date().toISOString(),
+                sender: '',
+                id: uuidv4()
+            };
+            this.send(verifyMsg);
         });
     }
 
@@ -591,36 +621,74 @@ export class ChatClient {
                 break;
 
             case MessageType.VERIFY_OK:
+                const vOk = msg as VerifyOkMessage;
                 console.log('验证码已发送，请检查你的邮箱');
-                this.rl.question('请输入验证码: ', (code) => {
-                    this.rl.question('请输入用户名: ', (username) => {
-                        this.rl.question('请输入密码: ', (password) => {
-                            this.rl.question('请输入昵称: ', (nickname) => {
-                                const registerMsg: RegisterMessage = {
-                                    type: MessageType.REGISTER,
-                                    payload: {
-                                        username: username.trim(),
-                                        password,
-                                        nickname: nickname.trim() || username.trim(),
-                                        email: this.pendingEmail,
-                                        verifyCode: code.trim()
-                                    },
-                                    timestamp: new Date().toISOString(),
-                                    sender: '',
-                                    id: uuidv4()
-                                };
-                                this.send(registerMsg);
-                                this.pendingEmail = '';
+                if (vOk.payload.action === 'reset') {
+                    // 找回密码流程
+                    this.rl.question('请输入验证码: ', (code) => {
+                        this.rl.question('请输入新密码: ', (newPassword) => {
+                            const resetMsg: ResetPasswordMessage = {
+                                type: MessageType.RESET_PASSWORD,
+                                payload: {
+                                    email: this.pendingEmail,
+                                    verifyCode: code.trim(),
+                                    newPassword
+                                },
+                                timestamp: new Date().toISOString(),
+                                sender: '',
+                                id: uuidv4()
+                            };
+                            this.send(resetMsg);
+                            this.pendingEmail = '';
+                        });
+                    });
+                } else {
+                    // 注册流程
+                    this.rl.question('请输入验证码: ', (code) => {
+                        this.rl.question('请输入用户名: ', (username) => {
+                            this.rl.question('请输入密码: ', (password) => {
+                                this.rl.question('请输入昵称: ', (nickname) => {
+                                    const registerMsg: RegisterMessage = {
+                                        type: MessageType.REGISTER,
+                                        payload: {
+                                            username: username.trim(),
+                                            password,
+                                            nickname: nickname.trim() || username.trim(),
+                                            email: this.pendingEmail,
+                                            verifyCode: code.trim()
+                                        },
+                                        timestamp: new Date().toISOString(),
+                                        sender: '',
+                                        id: uuidv4()
+                                    };
+                                    this.send(registerMsg);
+                                    this.pendingEmail = '';
+                                });
                             });
                         });
                     });
-                });
+                }
                 break;
 
             case MessageType.VERIFY_FAIL:
                 console.log('验证码发送失败:', (msg as any).payload?.reason || '未知原因');
+                this.pendingEmail = '';
                 this.promptAuthChoice();
                 break;
+
+            case MessageType.RESET_PASSWORD_OK:
+                const resetOk = msg as ResetPasswordOkMessage;
+                console.log(`✅ ${resetOk.payload.message} (${resetOk.payload.username})`);
+                console.log('请使用新密码重新登录');
+                this.promptAuthChoice();
+                break;
+
+            case MessageType.RESET_PASSWORD_FAIL:
+                const resetFail = msg as ResetPasswordFailMessage;
+                console.log('❌ 重置密码失败:', resetFail.payload.reason);
+                this.promptAuthChoice();
+                break;
+
             default:
                 break;
         }

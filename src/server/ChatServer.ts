@@ -4,8 +4,8 @@ import { Room } from "./Room";
 import { 
     BaseMessage, MessageType, AuthMessage, ChatMessage, WhisperMessage, JoinMessage,
     isAuthMessage, isChatMessage, isJoinMessage, isPongMessage, isWhisperMessage,
-    isRegisterMessage, isLoginMessage, isTokenMessage, isHistoryMessage, isSendVerifyMessage,
-    RegisterMessage, LoginMessage, TokenMessage, HistoryMessage, SendVerifyMessage
+    isRegisterMessage, isLoginMessage, isTokenMessage, isHistoryMessage, isSendVerifyMessage, isResetPasswordMessage,
+    RegisterMessage, LoginMessage, TokenMessage, HistoryMessage, SendVerifyMessage, ResetPasswordMessage
 } from '../shared/protocol';
 import { v4 as uuidv4 } from 'uuid';
 import { StoreManager } from './store/StoreManager';
@@ -149,6 +149,10 @@ export class ChatServer {
             }
             if (isTokenMessage(msg)) {
                 await this.handleTokenAuth(user, msg as TokenMessage);
+                return;
+            }
+            if (isResetPasswordMessage(msg)) {
+                await this.handleResetPassword(user, msg as ResetPasswordMessage);
                 return;
             }
             user.sendSystemMessage('请先登录或注册！用法: /register 或 /login');
@@ -387,7 +391,12 @@ export class ChatServer {
     /** 处理发送验证码请求 */
     private async handleSendVerify(user: User, msg: SendVerifyMessage): Promise<void> {
         const { email, action } = msg.payload;
-        const result = await this.authManager.getVerifyCodeService().sendCode(email, action);
+        let result;
+        if (action === 'reset') {
+            result = await this.authManager.requestPasswordReset(email);
+        } else {
+            result = await this.authManager.getVerifyCodeService().sendCode(email, action);
+        }
 
         if (!result.success) {
             user.sendMessage({
@@ -493,6 +502,41 @@ export class ChatServer {
         }
 
         await this.completeLogin(user, dbUser, msg.payload.token);
+    }
+
+    /** 处理重置密码请求 */
+    private async handleResetPassword(user: User, msg: ResetPasswordMessage): Promise<void> {
+        // TODO: 实现逻辑
+        // 1. 从 msg.payload 中解构出 email, verifyCode, newPassword
+        // 2. 调用 this.authManager.resetPassword(email, verifyCode, newPassword) 执行重置
+        // 3. 若失败，向客户端发送 MessageType.RESET_PASSWORD_FAIL 消息，payload 包含 reason
+        // 4. 若成功，向客户端发送 MessageType.RESET_PASSWORD_OK 消息，payload 包含 username 和提示信息
+        // 5. （可选）重置成功后自动帮用户完成登录，调用 completeLogin()
+
+        const payload : {email : string, verifyCode : string, newPassword : string} = msg.payload;
+        const resetResult = await this.authManager.resetPassword(payload.email, payload.verifyCode, payload.newPassword);
+        if(resetResult.success == false){
+            user.sendMessage({
+            type : MessageType.RESET_PASSWORD_FAIL,
+            payload : {
+                reason : `${resetResult.error}`
+            },
+            timestamp : new Date().toISOString(),
+            sender : 'system',
+            id : uuidv4()
+            } as BaseMessage);
+            return;
+        }
+        user.sendMessage({
+            type : MessageType.RESET_PASSWORD_OK,
+            payload : {
+                username: resetResult.user!.username,
+                message : "重置密码成功！"
+            },
+            timestamp : new Date().toISOString(),
+            sender : 'system',
+            id : uuidv4()
+            } as BaseMessage);
     }
 
     /** 完成登录后的通用逻辑 */

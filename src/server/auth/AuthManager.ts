@@ -95,4 +95,61 @@ export class AuthManager {
   verifyToken(token: string): TokenPayload | null {
     return TokenService.verify(token);
   }
+
+  /** 请求重置密码（发送找回验证码） */
+  async requestPasswordReset(email: string): Promise<{ success: boolean; error?: string }> {
+    // TODO: 实现逻辑
+    // 1. 校验邮箱格式
+    // 2. 通过 this.store.users.findByEmail(email) 查找用户
+    // 3. 若用户不存在返回错误"该邮箱未绑定账号"
+    // 4. 调用 this.verifyCodeService.sendCode(email, 'reset') 发送验证码
+    // 5. 返回 sendCode 的结果
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return { success: false, error: '邮箱格式不正确' };
+    }
+    const userRecord = this.store.users.findByEmail(email);
+    if (!userRecord) {
+      return { success: false, error: '该邮箱没有绑定账号，请确认邮箱是否正确' };
+    }
+    const code = await this.verifyCodeService.sendCode(email, 'reset');
+    if (!code.success) {
+      return { success: false, error: code.error };
+    }
+    return { success: true };
+  }
+
+  /** 重置密码 */
+  async resetPassword(email: string, verifyCode: string, newPassword: string): Promise<AuthResult> {
+    // TODO: 实现逻辑
+    // 1. 校验新密码格式（6-32位）
+    // 2. 通过 this.store.users.findByEmail(email) 查找用户
+    // 3. 若用户不存在返回错误
+    // 4. 调用 this.verifyCodeService.verifyCode(email, verifyCode, 'reset') 校验验证码
+    // 5. 若验证失败返回错误
+    // 6. 使用 PasswordService.hash(newPassword) 生成新密码哈希
+    // 7. 调用 this.store.users.updatePassword(user.id, newPasswordHash) 更新密码
+    // 8. 生成新的 JWT Token（可选：强制下线其他设备）
+    // 9. 返回包含 user 和 token 的 AuthResult
+    if(newPassword.length < 6 || newPassword.length > 32 ){
+      return { success : false , error : '密码长度必须在6-32位之内！'}
+    }
+    const user = this.store.users.findByEmail(email);
+    if(user == undefined){
+      return { success : false, error : '用户不存在！'};
+    }
+    const verifyResult = this.verifyCodeService.verifyCode(email, verifyCode, 'reset');
+    if (!verifyResult.success) {
+      return { success: false, error: verifyResult.error };
+    }
+    const newHash = await PasswordService.hash(newPassword);
+    const password = this.store.users.updatePassword(user.id, newHash);
+    if(password == false) return {success : false, error : '本地储存密码未更新成功！'}
+
+    const {token, expiresAt} = TokenService.generate({
+      userId : user.id,
+      username : user.username,
+      role : user.role
+    })
+    return { success: true, user,token,expiresAt};
+  }
 }
