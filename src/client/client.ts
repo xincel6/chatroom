@@ -1,261 +1,419 @@
 import { createConnection, Socket } from 'net';
-import * as readline from 'readline';
+import { execSync } from 'child_process';
 import {
     BaseMessage, MessageType, AuthMessage, ChatMessage, WhisperMessage, JoinMessage,
     RegisterMessage, LoginMessage, HistoryMessage,
     RegisterOkMessage, RegisterFailMessage, LoginOkMessage, LoginFailMessage,
     TokenOkMessage, TokenFailMessage, HistoryDataMessage,
     SendVerifyMessage, VerifyOkMessage,
-    ResetPasswordMessage, ResetPasswordOkMessage, ResetPasswordFailMessage
+    ResetPasswordMessage, ResetPasswordOkMessage, ResetPasswordFailMessage,
+    ListMessage, UserListMessage
 } from '../shared/protocol';
 import { v4 as uuidv4 } from 'uuid';
 
+type AuthMode =
+    | 'choice'
+    | 'login_user' | 'login_pass'
+    | 'register_email' | 'register_code' | 'register_user' | 'register_pass' | 'register_nick'
+    | 'guest_nick'
+    | 'forgot_email' | 'forgot_code' | 'forgot_pass'
+    | 'waiting'
+    | 'chat';
+
 export class ChatClient {
     private socket: Socket;
-    private rl: readline.Interface;
     private nickname: string = '';
     private currentRoom: string = 'Lobby';
     private buffer: string = '';
     private chatStarted: boolean = false;
     private token: string = '';
     private lastHistoryId: number | null = null;
-    private pendingEmail: string = ''; // 注册时暂存邮箱
+    private pendingEmail: string = '';
+    private authMode: AuthMode = 'choice';
+
+    private tempUsername: string = '';
+    private tempPassword: string = '';
+    private tempCode: string = '';
+
+    /** 输入缓冲区（手动管理，绕过 readline/blessed 的 Windows 兼容问题） */
     private inputBuffer: string = '';
-    private promptText: string = '';
+    /** 是否处于密码输入模式（回显 ***） */
+    private passwordMode: boolean = false;
+    /** 当前提示符文本 */
+    private prompt: string = '> ';
+    /** 记录上次回显的显示宽度，用于清除残留 */
+    private lastDisplayLen: number = 0;
+    /** 防重入标记 */
+    private writing: boolean = false;
+    private pendingMessages: string[] = [];
 
     constructor(host: string, port: number) {
-        this.socket = createConnection({ host, port });
-        
-        this.rl = readline.createInterface({
-            input: process.stdin,
-            output: process.stdout
-        });
+        if (process.platform === 'win32') {
+            try {
+                execSync('chcp 65001', { stdio: 'ignore' });
+            } catch {
+                // 忽略权限或环境错误
+            }
+        }
 
+        this.socket = createConnection({ host, port });
         this.setupSocket();
+        this.startInput();
     }
 
-    private setupSocket(): void {
-        this.socket.on('connect', () => {
-            console.log(' 已连接到服务器');
-            this.promptAuthChoice();
-        });
+    // ==================== 输入处理 ====================
 
-        this.socket.on('data', (chunk: Buffer) => {
-            this.buffer += chunk.toString();
-            const lines = this.buffer.split('\n');
-            this.buffer = lines.pop() || '';
+    private startInput(): void {
+        process.stdin.setRawMode(true);
+        process.stdin.resume();
+        process.stdin.setEncoding('utf8');
 
-            //这里是对服务器发来的数据进行处理，一次性接受多条信息或者一半信息的时候
-            // 通过换行符分割成多条消息，最后一条如果不完整就保存在 buffer 中等待下一次数据到来时继续拼接
-            // 逐行处理完整的消息
+        let escBuf = '';
 
-            for (const line of lines) {
-                if (!line.trim()) continue;
-                try {
-                    const msg = JSON.parse(line) as BaseMessage;
-                    this.handleMessage(msg);
-                } catch {
-                    // 忽略解析失败
+        process.stdin.on('data', (data: string) => {
+            for (const ch of data) {
+                // 处理 ESC 序列（方向键等）
+                if (escBuf) {
+                    escBuf += ch;
+                    if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || ch === '~') {
+                        escBuf = '';
+                    }
+                    continue;
+                }
+                if (ch === '\x1b') {
+                    escBuf = '\x1b';
+                    continue;
+                }
+
+                const code = ch.charCodeAt(0);
+
+                // Ctrl+C: 退出
+                if (code === 3) {
+                    this.socket.end();
+                    this.restoreTerminal();
+                    process.exit(0);
+                }
+
+                // Enter
+                if (code === 13) {
+                    const value = this.inputBuffer;
+                    this.inputBuffer = '';
+                    this.lastDisplayLen = 0;
+                    process.stdout.write('\n');
+                    this.handleInput(value);
+                    this.redrawPrompt();
+                    continue;
+                }
+
+                // Backspace
+                if (code === 8 || code === 127) {
+                    if (this.inputBuffer.length > 0) {
+                        this.inputBuffer = this.inputBuffer.slice(0, -1);
+                        this.echoBackspace();
+                    }
+                    continue;
+                }
+
+                // 可打印字符
+                if (code >= 32) {
+                    this.inputBuffer += ch;
+                    this.echoChar(ch);
                 }
             }
-            /**
-             * 这里为什么回调函数一直在监听
-             * 因为回调函数被注册到了 socket 的 'data' 事件上，
-             * 每当服务器发送数据到客户端时，这个回调函数就会被触发执行一次，处理接收到的数据。
-             * 这种事件驱动的设计使得客户端能够持续监听服务器的消息，而不需要阻塞主线程等待数据到来。
-             * 当服务器发送数据时，回调函数会被调用，处理完当前数据后继续等待下一次数据到来，形成一个持续的监听循环。
-             * 这也是 Node.js 中常见的异步事件处理模式，使得应用能够高效地响应外部事件而不阻塞执行流程。
-             * 
-             */
-        });
-
-        this.socket.on('close', () => {
-            console.log('\n❌ 连接已断开');
-            this.rl.close();
-            process.exit(0);
-        });
-
-        this.socket.on('error', (err) => {
-            console.log('连接错误:', err.message);
-            process.exit(1);
-        });
-        //这三个异步函数分别处理连接成功、接收数据、连接关闭和错误事件，确保客户端能够正确响应服务器的状态变化和消息。
-        //
-    }
-
-    private firstMenu(): void {
-        console.log('欢迎来到聊天室');
-        console.log('用户默认房间是 Lobby, 你可以使用/help查询你能做的指令');
-    }
-
-    private promptAuthChoice(): void {
-        if ((this.rl as any).closed) return;
-        this.rl.question('选择操作: [1]登录 [2]注册 [3]游客登录 [4]找回密码 > ', (choice) => {
-            switch (choice.trim()) {
-                case '1': this.promptLogin(); break;
-                case '2': this.promptRegister(); break;
-                case '3': this.promptGuestLogin(); break;
-                case '4': this.promptForgotPassword(); break;
-                default:
-                    console.log('无效选项');
-                    this.promptAuthChoice();
-                    //简单的递归思路解决输入错误后重新提示选择
-            }
         });
     }
 
-    private promptLogin(): void {
-        this.rl.question('用户名: ', (username) => {
-            this.rl.question('密码: ', (password) => {
+    private getDisplayBuffer(): string {
+        if (this.passwordMode) {
+            return '*'.repeat(this.inputBuffer.length);
+        }
+        return this.inputBuffer;
+    }
+
+    private echoChar(ch: string): void {
+        if (this.passwordMode) {
+            process.stdout.write('*');
+        } else {
+            process.stdout.write(ch);
+        }
+        this.lastDisplayLen = this.getDisplayBuffer().length;
+    }
+
+    private echoBackspace(): void {
+        const currentDisplay = this.getDisplayBuffer();
+        if (this.lastDisplayLen > 0 && currentDisplay.length < this.lastDisplayLen) {
+            process.stdout.write('\b \b');
+        }
+        this.lastDisplayLen = currentDisplay.length;
+    }
+
+    /** 刷新输入提示行 */
+    private redrawPrompt(): void {
+        const display = this.getDisplayBuffer();
+        // 清除当前行残留
+        const clearLen = Math.max(this.lastDisplayLen, display.length);
+        process.stdout.write('\r\x1b[K' + this.prompt + display);
+        if (display.length < clearLen) {
+            process.stdout.write(' '.repeat(clearLen - display.length));
+            process.stdout.write('\r\x1b[K' + this.prompt + display);
+        }
+        this.lastDisplayLen = display.length;
+    }
+
+    private setPrompt(prompt: string): void {
+        this.prompt = prompt;
+        this.redrawPrompt();
+    }
+
+    private restoreTerminal(): void {
+        process.stdin.setRawMode(false);
+        process.stdin.pause();
+    }
+
+    // ==================== 消息输出 ====================
+
+    private addMessage(text: string): void {
+        if (this.writing) {
+            this.pendingMessages.push(text);
+            return;
+        }
+        this.writing = true;
+
+        // 清除当前输入行，打印消息，再重绘输入行
+        process.stdout.write('\r\x1b[K');
+        const lines = text.split('\n');
+        for (const line of lines) {
+            process.stdout.write(line + '\n');
+        }
+        this.redrawPrompt();
+
+        this.writing = false;
+
+        // 排空积压消息
+        while (this.pendingMessages.length > 0) {
+            const msg = this.pendingMessages.shift()!;
+            this.addMessage(msg);
+        }
+    }
+
+    private addError(text: string): void {
+        this.addMessage(`\x1b[31m${text}\x1b[0m`);
+    }
+
+    // ==================== 输入分发 ====================
+
+    private handleInput(value: string): void {
+        const line = value.trim();
+        if (!line) return;
+
+        switch (this.authMode) {
+            case 'choice':
+                this.handleAuthChoice(line);
+                break;
+
+            case 'login_user':
+                this.tempUsername = line;
+                this.authMode = 'login_pass';
+                this.passwordMode = true;
+                this.setPrompt('密码: ');
+                break;
+
+            case 'login_pass': {
+                this.passwordMode = false;
                 const login: LoginMessage = {
                     type: MessageType.LOGIN,
-                    payload: { username: username.trim(), password },
+                    payload: { username: this.tempUsername.trim(), password: line },
                     timestamp: new Date().toISOString(),
                     sender: '',
                     id: uuidv4()
                 };
                 this.send(login);
-            });
-        });
-    }
-
-    private promptRegister(): void {
-        this.rl.question('邮箱: ', (email) => {
-            const trimmedEmail = email.trim();
-            if (!trimmedEmail) {
-                console.log('邮箱不能为空');
-                this.promptRegister();
-                return;
+                this.authMode = 'waiting';
+                this.setPrompt('');
+                this.addMessage('正在登录...');
+                break;
             }
-            if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
-                console.log('邮箱格式不正确');
-                this.promptRegister();
-                return;
+
+            case 'register_email': {
+                if (!line) {
+                    this.addError('邮箱不能为空');
+                    return;
+                }
+                if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(line)) {
+                    this.addError('邮箱格式不正确');
+                    return;
+                }
+                this.pendingEmail = line;
+                const verifyMsg: SendVerifyMessage = {
+                    type: MessageType.SEND_VERIFY,
+                    payload: { action: 'register', email: line },
+                    timestamp: new Date().toISOString(),
+                    sender: '',
+                    id: uuidv4()
+                };
+                this.send(verifyMsg);
+                this.authMode = 'waiting';
+                this.setPrompt('');
+                this.addMessage('验证码已发送，请检查邮箱...');
+                break;
             }
-            this.pendingEmail = trimmedEmail;
-            const verifyMsg: SendVerifyMessage = {
-                type: MessageType.SEND_VERIFY,
-                payload: {
-                    action: 'register',
-                    email: trimmedEmail
-                },
-                timestamp: new Date().toISOString(),
-                sender: '',
-                id: uuidv4()
-            };
-            this.send(verifyMsg);
-        });
-    }
 
-    private promptGuestLogin(): void {
-        this.rl.question('请输入昵称: ', (name) => {
-            const trimmed = name.trim();
-            if (!trimmed) {
-                console.log('昵称不能为空');
-                this.promptGuestLogin();
-                return;
+            case 'register_code':
+                this.tempCode = line;
+                this.authMode = 'register_user';
+                this.setPrompt('用户名: ');
+                break;
+
+            case 'register_user':
+                this.tempUsername = line;
+                this.authMode = 'register_pass';
+                this.passwordMode = true;
+                this.setPrompt('密码: ');
+                break;
+
+            case 'register_pass': {
+                this.passwordMode = false;
+                this.tempPassword = line;
+                this.authMode = 'register_nick';
+                this.setPrompt('昵称: ');
+                break;
             }
-            this.nickname = trimmed;
-            const auth: AuthMessage = {
-                type: MessageType.AUTH,
-                payload: { nickname: trimmed },
-                timestamp: new Date().toISOString(),
-                sender: '',
-                id: uuidv4()
-            };
-            this.send(auth);
-        });
-    }
 
-    private promptForgotPassword(): void {
-        this.rl.question('请输入注册邮箱: ', (email) => {
-            const trimmedEmail = email.trim();
-            if (!trimmedEmail) {
-                console.log('邮箱不能为空');
-                this.promptForgotPassword();
-                return;
+            case 'register_nick': {
+                const registerMsg: RegisterMessage = {
+                    type: MessageType.REGISTER,
+                    payload: {
+                        username: this.tempUsername.trim(),
+                        password: this.tempPassword,
+                        nickname: line.trim() || this.tempUsername.trim(),
+                        email: this.pendingEmail,
+                        verifyCode: this.tempCode.trim()
+                    },
+                    timestamp: new Date().toISOString(),
+                    sender: '',
+                    id: uuidv4()
+                };
+                this.send(registerMsg);
+                this.pendingEmail = '';
+                this.authMode = 'waiting';
+                this.setPrompt('');
+                this.addMessage('正在注册...');
+                break;
             }
-            if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
-                console.log('邮箱格式不正确');
-                this.promptForgotPassword();
-                return;
+
+            case 'guest_nick': {
+                if (!line) {
+                    this.addError('昵称不能为空');
+                    return;
+                }
+                this.nickname = line;
+                const auth: AuthMessage = {
+                    type: MessageType.AUTH,
+                    payload: { nickname: line },
+                    timestamp: new Date().toISOString(),
+                    sender: '',
+                    id: uuidv4()
+                };
+                this.send(auth);
+                this.authMode = 'waiting';
+                this.setPrompt('');
+                this.addMessage('正在认证...');
+                break;
             }
-            this.pendingEmail = trimmedEmail;
-            const verifyMsg: SendVerifyMessage = {
-                type: MessageType.SEND_VERIFY,
-                payload: {
-                    action: 'reset',
-                    email: trimmedEmail
-                },
-                timestamp: new Date().toISOString(),
-                sender: '',
-                id: uuidv4()
-            };
-            this.send(verifyMsg);
-        });
-    }
 
-    private startChat(): void {
-        if (this.chatStarted) return;
-        this.chatStarted = true;
-        this.firstMenu();
+            case 'forgot_email': {
+                if (!line) {
+                    this.addError('邮箱不能为空');
+                    return;
+                }
+                if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(line)) {
+                    this.addError('邮箱格式不正确');
+                    return;
+                }
+                this.pendingEmail = line;
+                const verifyMsg: SendVerifyMessage = {
+                    type: MessageType.SEND_VERIFY,
+                    payload: { action: 'reset', email: line },
+                    timestamp: new Date().toISOString(),
+                    sender: '',
+                    id: uuidv4()
+                };
+                this.send(verifyMsg);
+                this.authMode = 'waiting';
+                this.setPrompt('');
+                this.addMessage('验证码已发送，请检查邮箱...');
+                break;
+            }
 
-        this.promptText = `${this.nickname}[${this.currentRoom}]> `;
-        this.inputBuffer = '';
+            case 'forgot_code':
+                this.tempCode = line;
+                this.authMode = 'forgot_pass';
+                this.passwordMode = true;
+                this.setPrompt('新密码: ');
+                break;
 
-        // 移除原有的 line 事件监听，防止和 keypress 冲突
-        this.rl.removeAllListeners('line');
+            case 'forgot_pass': {
+                this.passwordMode = false;
+                const resetMsg: ResetPasswordMessage = {
+                    type: MessageType.RESET_PASSWORD,
+                    payload: {
+                        email: this.pendingEmail,
+                        verifyCode: this.tempCode.trim(),
+                        newPassword: line
+                    },
+                    timestamp: new Date().toISOString(),
+                    sender: '',
+                    id: uuidv4()
+                };
+                this.send(resetMsg);
+                this.pendingEmail = '';
+                this.authMode = 'waiting';
+                this.setPrompt('');
+                this.addMessage('正在重置密码...');
+                break;
+            }
 
-        // 启用 keypress 事件
-        readline.emitKeypressEvents(process.stdin);
-        if (process.stdin.isTTY) {
-            process.stdin.setRawMode(true);
+            case 'chat':
+                this.handleChatInput(line);
+                break;
+
+            case 'waiting':
+                this.addError('请等待服务器响应...');
+                break;
+
+            default:
+                break;
         }
-
-        this.setupKeypressHandler();
-        this.redrawInputLine();
     }
 
-    private setupKeypressHandler(): void {
-        process.stdin.on('keypress', (str, key) => {
-            // 处理 Ctrl+C
-            if (key.sequence === '\u0003') {
-                process.exit(0);
-            }
-
-            // 回车发送
-            if (key.name === 'return' || key.name === 'enter') {
-                const content = this.inputBuffer;
-                this.inputBuffer = '';
-                this.clearInputLines();
-                this.handleUserInput(content);
-                return;
-            }
-
-            // 退格
-            if (key.name === 'backspace') {
-                this.inputBuffer = this.inputBuffer.slice(0, -1);
-            } else if (str && !key.ctrl && !key.meta) {
-                // 普通字符输入
-                this.inputBuffer += str;
-            }
-
-            // 每次按键后清行重绘
-            this.redrawInputLine();
-        });
-    }
-
-    private handleUserInput(line: string): void {
-        if (!line) {
-            this.redrawInputLine();
-            return;
+    private handleAuthChoice(choice: string): void {
+        switch (choice.trim()) {
+            case '1':
+                this.authMode = 'login_user';
+                this.setPrompt('用户名: ');
+                break;
+            case '2':
+                this.authMode = 'register_email';
+                this.setPrompt('邮箱: ');
+                break;
+            case '3':
+                this.authMode = 'guest_nick';
+                this.setPrompt('昵称: ');
+                break;
+            case '4':
+                this.authMode = 'forgot_email';
+                this.setPrompt('注册邮箱: ');
+                break;
+            default:
+                this.addError('无效选项');
+                this.promptAuthChoice();
         }
+    }
 
+    private handleChatInput(line: string): void {
         if (line.startsWith('/')) {
-            const needPrompt = this.handleCommand(line);
-            if (!needPrompt) return;
+            this.handleCommand(line);
         } else {
-            // 普通聊天
             const msg: ChatMessage = {
                 type: MessageType.CHAT,
                 payload: {
@@ -268,290 +426,319 @@ export class ChatClient {
             };
             this.send(msg);
         }
-        this.redrawInputLine();
     }
 
-    private redrawInputLine(): void {
-        const prompt = this.promptText;
-        const fullText = prompt + this.inputBuffer;
-        const terminalWidth = process.stdout.columns || 80;
+    // ==================== 网络处理 ====================
 
-        // 计算当前输入占用了多少行
-        const lines = Math.ceil(fullText.length / terminalWidth) || 1;
+    private setupSocket(): void {
+        this.socket.on('connect', () => {
+            this.addMessage('已连接到服务器');
+            this.promptAuthChoice();
+        });
 
-        // 光标回到当前输入的第一行开头
-        process.stdout.write('\r');
+        this.socket.on('data', (chunk: Buffer) => {
+            this.buffer += chunk.toString();
+            const lines = this.buffer.split('\n');
+            this.buffer = lines.pop() || '';
 
-        // 从最后一行开始，逐行上移并清除
-        for (let i = 1; i < lines; i++) {
-            process.stdout.write('\x1b[1A'); // 上移一行
-            process.stdout.write('\x1b[K');  // 清除该行
-        }
-        // 回到第一行并清除
-        process.stdout.write('\x1b[K');
+            for (const line of lines) {
+                if (!line.trim()) continue;
+                try {
+                    const msg = JSON.parse(line) as BaseMessage;
+                    this.handleMessage(msg);
+                } catch {
+                    // 忽略解析失败
+                }
+            }
+        });
 
-        // 重新输出提示符 + 当前缓冲区内容
-        process.stdout.write(prompt + this.inputBuffer);
+        this.socket.on('close', () => {
+            this.addMessage('连接已断开');
+            this.restoreTerminal();
+            process.exit(0);
+        });
+
+        this.socket.on('error', (err) => {
+            this.addError(`连接错误: ${err.message}`);
+            this.restoreTerminal();
+            process.exit(1);
+        });
     }
 
-    private clearInputLines(): void {
-        const prompt = this.promptText;
-        const fullText = prompt + this.inputBuffer;
-        const terminalWidth = process.stdout.columns || 80;
-        const lines = Math.ceil(fullText.length / terminalWidth) || 1;
+    // ==================== 认证 / 聊天流程 ====================
 
-        process.stdout.write('\r');
-        for (let i = 1; i < lines; i++) {
-            process.stdout.write('\x1b[1A\x1b[K');
-        }
-        process.stdout.write('\x1b[K');
+    private firstMenu(): void {
+        this.addMessage('欢迎来到聊天室');
+        this.addMessage('当前房间: Lobby | 输入 /help 查看可用命令');
     }
+
+    private promptAuthChoice(): void {
+        this.authMode = 'choice';
+        this.addMessage('');
+        this.addMessage('选择操作: [1]登录 [2]注册 [3]游客登录 [4]找回密码');
+        this.setPrompt('请输入选项编号 > ');
+    }
+
+    private startChat(): void {
+        if (this.chatStarted) return;
+        this.chatStarted = true;
+        this.authMode = 'chat';
+        this.firstMenu();
+        this.setPrompt(`[${this.currentRoom}] ${this.nickname}> `);
+    }
+
+    // ==================== 命令处理 ====================
 
     private handleCommand(line: string): boolean {
         const parts = line.slice(1).split(' ');
-        //切除命令前的 '/'，然后通过空格分割成多个部分，第一部分是命令名称，后续部分是命令参数。
         const cmd = parts[0].toLowerCase();
-        //根据不同的命令名称执行对应的逻辑
-        //这里因为切除过了0索引的 '/'，所以直接从 parts[0] 开始就是命令名称了，不需要再加1了
 
         switch (cmd) {
             case 'help':
             case 'h':
-                console.log('可用命令:');
-                console.log('  /help, /h              显示帮助');
-                console.log('  /quit, /q              退出客户端');
-                console.log('  /w <昵称> <内容>        发送私聊');
-                console.log('  /join <房间名> [密码]   加入或创建房间');
-                console.log('  /history               加载当前房间历史消息');
-                console.log('  /more                  加载更多历史消息');
+                this.addMessage('可用命令:');
+                this.addMessage('  /help, /h              显示帮助');
+                this.addMessage('  /quit, /q              退出客户端');
+                this.addMessage('  /w <昵称> <内容>        发送私聊');
+                this.addMessage('  /join <房间名> [密码]   加入或创建房间');
+                this.addMessage('  /list                  查看在线用户列表');
+                this.addMessage('  /history               加载当前房间历史消息');
+                this.addMessage('  /more                  加载更多历史消息');
                 break;
-            case 'admin':{
+
+            case 'list': {
+                const listMsg: ListMessage = {
+                    type: MessageType.LIST,
+                    payload: { room: this.currentRoom },
+                    timestamp: new Date().toISOString(),
+                    sender: this.nickname,
+                    id: uuidv4()
+                };
+                this.send(listMsg);
+                break;
+            }
+
+            case 'admin': {
                 if (parts.length < 2) {
-                    console.log('用法: /admin <命令> [参数]');
+                    this.addMessage('用法: /admin <命令> [参数]');
                     break;
                 }
                 const adminCmd = parts[1].toLowerCase();
-                switch(adminCmd){
-                    case 'help':{
-                        console.log('管理员命令:');
-                        console.log('  /admin kick <昵称> <房间>     将用户踢出房间');
-                        console.log('  /admin mute <昵称> <分钟>     禁言用户');
-                        console.log('  /admin unmute <昵称>          解除用户禁言');
-                        console.log('  /admin deuser <昵称>          删除用户');
-                        console.log('  /admin search <房间> <关键词>  搜索消息');
-                        console.log('  /admin role <昵称> <角色>     修改用户角色 (MEMBER|ADMIN|MODERATOR)');
-                        console.log('  /admin deroom <房间>          删除房间');
-                        console.log('  /admin ban <昵称>             封禁用户');
-                        console.log('  /admin unban <昵称>           解除封禁');
+                switch (adminCmd) {
+                    case 'help': {
+                        this.addMessage('管理员命令:');
+                        this.addMessage('  /admin kick <昵称> <房间>     将用户踢出房间');
+                        this.addMessage('  /admin mute <昵称> <分钟>     禁言用户');
+                        this.addMessage('  /admin unmute <昵称>          解除用户禁言');
+                        this.addMessage('  /admin deuser <昵称>          删除用户');
+                        this.addMessage('  /admin search <房间> <关键词>  搜索消息');
+                        this.addMessage('  /admin role <昵称> <角色>     修改用户角色 (MEMBER|ADMIN|MODERATOR)');
+                        this.addMessage('  /admin deroom <房间>          删除房间');
+                        this.addMessage('  /admin ban <昵称>             封禁用户');
+                        this.addMessage('  /admin unban <昵称>           解除封禁');
                         break;
                     }
-                    case 'kick':{
+                    case 'kick': {
                         if (parts.length < 4) {
-                            console.log('用法: /admin kick <昵称> <房间>');
+                            this.addMessage('用法: /admin kick <昵称> <房间>');
                             break;
                         }
                         const target = parts[2];
                         const room = parts[3];
-                        const cmdMsg: BaseMessage = {
+                        this.send({
                             type: MessageType.COMMAND,
                             payload: { command: 'kick', target, room, duration: 300 },
                             timestamp: new Date().toISOString(),
                             sender: this.nickname,
                             id: uuidv4()
-                        };
-                        this.send(cmdMsg);
+                        } as BaseMessage);
                         break;
                     }
-                    case 'mute':{
+                    case 'mute': {
                         if (parts.length < 4) {
-                            console.log('用法: /admin mute <昵称> <分钟>');
+                            this.addMessage('用法: /admin mute <昵称> <分钟>');
                             break;
                         }
                         const target = parts[2];
                         const minutes = parseInt(parts[3], 10);
                         if (isNaN(minutes) || minutes <= 0) {
-                            console.log('分钟数必须是正整数');
+                            this.addMessage('分钟数必须是正整数');
                             break;
                         }
-                        const cmdMsg: BaseMessage = {
+                        this.send({
                             type: MessageType.COMMAND,
                             payload: { command: 'mute', target, duration: minutes * 60 },
                             timestamp: new Date().toISOString(),
                             sender: this.nickname,
                             id: uuidv4()
-                        };
-                        this.send(cmdMsg);
+                        } as BaseMessage);
                         break;
                     }
-                    case 'unmute':{
+                    case 'unmute': {
                         if (parts.length < 3) {
-                            console.log('用法: /admin unmute <昵称>');
+                            this.addMessage('用法: /admin unmute <昵称>');
                             break;
                         }
                         const target = parts[2];
-                        const cmdMsg: BaseMessage = {
+                        this.send({
                             type: MessageType.COMMAND,
                             payload: { command: 'unmute', target },
                             timestamp: new Date().toISOString(),
                             sender: this.nickname,
                             id: uuidv4()
-                        };
-                        this.send(cmdMsg);
+                        } as BaseMessage);
                         break;
                     }
-                    case 'ban':{
+                    case 'ban': {
                         if (parts.length < 3) {
-                            console.log('用法: /admin ban <昵称>');
+                            this.addMessage('用法: /admin ban <昵称>');
                             break;
                         }
                         const target = parts[2];
-                        const cmdMsg: BaseMessage = {
+                        this.send({
                             type: MessageType.COMMAND,
                             payload: { command: 'ban', target, duration: 86400 },
                             timestamp: new Date().toISOString(),
                             sender: this.nickname,
                             id: uuidv4()
-                        };
-                        this.send(cmdMsg);
+                        } as BaseMessage);
                         break;
                     }
-                    case 'unban':{
+                    case 'unban': {
                         if (parts.length < 3) {
-                            console.log('用法: /admin unban <昵称>');
+                            this.addMessage('用法: /admin unban <昵称>');
                             break;
                         }
                         const target = parts[2];
-                        const cmdMsg: BaseMessage = {
+                        this.send({
                             type: MessageType.COMMAND,
                             payload: { command: 'unban', target },
                             timestamp: new Date().toISOString(),
                             sender: this.nickname,
                             id: uuidv4()
-                        };
-                        this.send(cmdMsg);
+                        } as BaseMessage);
                         break;
                     }
-                    case 'deuser':{
+                    case 'deuser': {
                         if (parts.length < 3) {
-                            console.log('用法: /admin deuser <昵称>');
+                            this.addMessage('用法: /admin deuser <昵称>');
                             break;
                         }
                         const target = parts[2];
-                        const cmdMsg: BaseMessage = {
+                        this.send({
                             type: MessageType.COMMAND,
                             payload: { command: 'deuser', target },
                             timestamp: new Date().toISOString(),
                             sender: this.nickname,
                             id: uuidv4()
-                        };
-                        this.send(cmdMsg);
+                        } as BaseMessage);
                         break;
                     }
-                    case 'search':{
+                    case 'search': {
                         if (parts.length < 4) {
-                            console.log('用法: /admin search <房间> <关键词>');
+                            this.addMessage('用法: /admin search <房间> <关键词>');
                             break;
                         }
                         const room = parts[2];
                         const keyword = parts.slice(3).join(' ');
-                        const cmdMsg: BaseMessage = {
+                        this.send({
                             type: MessageType.COMMAND,
                             payload: { command: 'search', room, keyword },
                             timestamp: new Date().toISOString(),
                             sender: this.nickname,
                             id: uuidv4()
-                        };
-                        this.send(cmdMsg);
+                        } as BaseMessage);
                         break;
                     }
-                    case 'role':{
+                    case 'role': {
                         if (parts.length < 4) {
-                            console.log('用法: /admin role <昵称> <角色>');
+                            this.addMessage('用法: /admin role <昵称> <角色>');
                             break;
                         }
                         const target = parts[2];
                         const role = parts[3].toUpperCase();
                         if (!['MEMBER', 'ADMIN', 'MODERATOR'].includes(role)) {
-                            console.log('角色必须是 MEMBER、ADMIN 或 MODERATOR');
+                            this.addMessage('角色必须是 MEMBER、ADMIN 或 MODERATOR');
                             break;
                         }
-                        const cmdMsg: BaseMessage = {
+                        this.send({
                             type: MessageType.COMMAND,
                             payload: { command: 'role', target, role },
                             timestamp: new Date().toISOString(),
                             sender: this.nickname,
                             id: uuidv4()
-                        };
-                        this.send(cmdMsg);
+                        } as BaseMessage);
                         break;
                     }
-                    case 'deroom':{
+                    case 'deroom': {
                         if (parts.length < 3) {
-                            console.log('用法: /admin deroom <房间>');
+                            this.addMessage('用法: /admin deroom <房间>');
                             break;
                         }
                         const room = parts[2];
-                        const cmdMsg: BaseMessage = {
+                        this.send({
                             type: MessageType.COMMAND,
                             payload: { command: 'deroom', room },
                             timestamp: new Date().toISOString(),
                             sender: this.nickname,
                             id: uuidv4()
-                        };
-                        this.send(cmdMsg);
+                        } as BaseMessage);
                         break;
                     }
                     default:
-                        console.log('未知管理员命令:', adminCmd);
+                        this.addMessage('未知管理员命令: ' + adminCmd);
                 }
                 break;
             }
-
 
             case 'quit':
             case 'q':
                 this.socket.end();
                 return false;
-            
+
             case 'w':
             case 'whisper':
                 if (parts.length < 3) {
-                    console.log('用法: /w <昵称> <内容>');
+                    this.addMessage('用法: /w <昵称> <内容>');
                     break;
                 }
-                const target = parts[1];
-                const content = parts.slice(2).join(' ');
-                // 构造私聊消息并发送
-                const whisper: WhisperMessage = {
-                    type: MessageType.WHISPER,
-                    payload: { target, content },
-                    timestamp: new Date().toISOString(),
-                    sender: this.nickname,
-                    id: uuidv4()
-                };
-                this.send(whisper);
+                {
+                    const target = parts[1];
+                    const content = parts.slice(2).join(' ');
+                    const whisper: WhisperMessage = {
+                        type: MessageType.WHISPER,
+                        payload: { target, content },
+                        timestamp: new Date().toISOString(),
+                        sender: this.nickname,
+                        id: uuidv4()
+                    };
+                    this.send(whisper);
+                }
                 break;
 
             case 'join':
                 if (parts.length < 2) {
-                    console.log('用法: /join <房间名>');
+                    this.addMessage('用法: /join <房间名>');
                     break;
                 }
-                const roomName = parts[1];
-                this.currentRoom = roomName;
-                this.promptText = `${this.nickname}[${this.currentRoom}]> `;
-                //重新设计置提示符以反映当前房间的变化
-                const join: JoinMessage = {
-                    type: MessageType.JOIN,
-                    payload: { room: roomName },
-                    timestamp: new Date().toISOString(),
-                    sender: this.nickname,
-                    id: uuidv4()
-                };
-                this.send(join);
+                {
+                    const roomName = parts[1];
+                    const oldRoom = this.currentRoom;
+                    this.currentRoom = roomName;
+                    this.setPrompt(`[${this.currentRoom}] ${this.nickname}> `);
+                    const join: JoinMessage = {
+                        type: MessageType.JOIN,
+                        payload: { room: roomName },
+                        timestamp: new Date().toISOString(),
+                        sender: this.nickname,
+                        id: uuidv4()
+                    };
+                    this.send(join);
+                    this.addMessage(`正在加入房间 ${roomName}...`);
+                }
                 break;
 
-            case 'history':
+            case 'history': {
                 const history: HistoryMessage = {
                     type: MessageType.HISTORY,
                     payload: { room: this.currentRoom, limit: 20 },
@@ -561,6 +748,7 @@ export class ChatClient {
                 };
                 this.send(history);
                 break;
+            }
 
             case 'more':
                 if (this.lastHistoryId !== null) {
@@ -577,215 +765,182 @@ export class ChatClient {
                     };
                     this.send(more);
                 } else {
-                    console.log('请先使用 /history 加载历史消息');
+                    this.addMessage('请先使用 /history 加载历史消息');
                 }
                 break;
 
             default:
-                console.log('未知命令:', cmd);
+                this.addMessage('未知命令: ' + cmd);
         }
         return true;
     }
 
+    // ==================== 消息处理 ====================
+
     private handleMessage(msg: BaseMessage): void {
-        const needPreserveInput = this.chatStarted && [
-            MessageType.CHAT, MessageType.WHISPER, MessageType.SYSTEM,
-            MessageType.PRESENCE, MessageType.ERROR, MessageType.HISTORY_DATA
-        ].includes(msg.type);
-
-        if (needPreserveInput) {
-            this.clearInputLines();
-        }
-
-        //直接枚举消息类型跳转到对应的处理逻辑，保持代码清晰和可维护
         switch (msg.type) {
             case MessageType.AUTH_OK:
-                console.log(' 认证成功！');
+                this.addMessage('认证成功！');
                 this.startChat();
                 break;
 
             case MessageType.AUTH_FAIL:
-                console.log(' 认证失败:', (msg as any).payload?.reason || '未知原因');
-                this.promptGuestLogin();
-                break;
-
-            case MessageType.REGISTER_OK:
-                const rOk = msg as RegisterOkMessage;
-                console.log(` 注册成功！欢迎 ${rOk.payload.nickname}`);
-                break;
-
-            case MessageType.REGISTER_FAIL:
-                const rFail = msg as RegisterFailMessage;
-                console.log(' 注册失败:', rFail.payload.reason);
+                this.addError('认证失败: ' + ((msg as any).payload?.reason || '未知原因'));
                 this.promptAuthChoice();
                 break;
 
-            case MessageType.LOGIN_OK:
+            case MessageType.REGISTER_OK: {
+                const rOk = msg as RegisterOkMessage;
+                this.addMessage(`注册成功！欢迎 ${rOk.payload.nickname}`);
+                break;
+            }
+
+            case MessageType.REGISTER_FAIL: {
+                const rFail = msg as RegisterFailMessage;
+                this.addError('注册失败: ' + rFail.payload.reason);
+                this.promptAuthChoice();
+                break;
+            }
+
+            case MessageType.LOGIN_OK: {
                 const lOk = msg as LoginOkMessage;
                 this.token = lOk.payload.token;
                 this.nickname = lOk.payload.user.nickname;
-                console.log(` 登录成功！欢迎 ${lOk.payload.user.nickname}`);
+                this.addMessage(`登录成功！欢迎 ${lOk.payload.user.nickname}`);
                 this.startChat();
                 break;
+            }
 
-            case MessageType.LOGIN_FAIL:
+            case MessageType.LOGIN_FAIL: {
                 const lFail = msg as LoginFailMessage;
-                console.log('❌ 登录失败:', lFail.payload.reason);
+                this.addError('登录失败: ' + lFail.payload.reason);
                 this.promptAuthChoice();
                 break;
+            }
 
-            case MessageType.TOKEN_OK:
+            case MessageType.TOKEN_OK: {
                 const tOk = msg as TokenOkMessage;
                 this.nickname = tOk.payload.nickname;
-                console.log('🎉 Token 认证成功！');
+                this.addMessage('Token 认证成功！');
                 this.startChat();
                 break;
+            }
 
             case MessageType.TOKEN_FAIL:
-                console.log('❌ Token 已过期，请重新登录');
+                this.addError('Token 已过期，请重新登录');
                 this.promptAuthChoice();
                 break;
 
-            case MessageType.HISTORY_DATA:
+            case MessageType.HISTORY_DATA: {
                 const h = msg as HistoryDataMessage;
                 if (h.payload.messages.length === 0) {
-                    console.log('--- 没有更多历史消息 ---');
+                    this.addMessage('--- 没有更多历史消息 ---');
                 } else {
                     for (const m of h.payload.messages) {
                         const time = new Date(m.createdAt * 1000).toLocaleTimeString();
-                        console.log(`[${time}] ${m.sender}: ${m.content}`);
+                        this.addMessage(`[${time}] ${m.sender}: ${m.content}`);
                     }
                     if (h.payload.hasMore) {
                         this.lastHistoryId = h.payload.messages[h.payload.messages.length - 1].id;
-                        console.log('--- 输入 /more 加载更多 ---');
+                        this.addMessage('--- 输入 /more 加载更多 ---');
                     } else {
                         this.lastHistoryId = null;
-                        console.log('--- 已加载全部历史消息 ---');
+                        this.addMessage('--- 已加载全部历史消息 ---');
                     }
                 }
                 break;
+            }
 
-            case MessageType.CHAT:
+            case MessageType.CHAT: {
                 const chatPayload = (msg as ChatMessage).payload;
-                console.log(`\n[${msg.sender}] ${chatPayload.content}`);
+                this.addMessage(`[${msg.sender}] ${chatPayload.content}`);
                 break;
+            }
 
-            case MessageType.WHISPER:
+            case MessageType.WHISPER: {
                 const whisperPayload = (msg as WhisperMessage).payload;
-                console.log(`\n[私聊 ${msg.sender}→你] ${whisperPayload.content}`);
+                this.addMessage(`\x1b[35m[私聊 ${msg.sender} \u2192 你] ${whisperPayload.content}\x1b[0m`);
                 break;
+            }
 
             case MessageType.SYSTEM:
-                console.log(`\n[System] ${(msg as any).payload?.content || ''}`);
+                this.addMessage(`[System] ${(msg as any).payload?.content || ''}`);
                 break;
 
-            case MessageType.PRESENCE:
+            case MessageType.PRESENCE: {
                 const p = (msg as any).payload;
-                console.log(`\n👤 ${p.nickname} ${p.action === 'join' ? '进入' : '离开'}了 ${p.room}`);
+                this.addMessage(`\x1b[36m${p.nickname} ${p.action === 'join' ? '进入' : '离开'}了 ${p.room}\x1b[0m`);
                 break;
+            }
+
+            case MessageType.USER_LIST: {
+                const ul = msg as UserListMessage;
+                const users = ul.payload.users;
+                if (users.length === 0) {
+                    this.addMessage('当前没有在线用户');
+                } else {
+                    this.addMessage(`=== 在线用户 (${users.length}) ===`);
+                    for (const u of users) {
+                        const statusIcon = u.status === 'online' ? '\x1b[32m\u25cf\x1b[0m' : '\x1b[33m\u25cf\x1b[0m';
+                        this.addMessage(`  ${statusIcon} ${u.nickname}  @${u.room}`);
+                    }
+                }
+                break;
+            }
 
             case MessageType.PING:
-                // 自动回复心跳
                 this.send({
                     type: MessageType.PONG,
                     payload: { timestamp: Date.now() },
                     timestamp: new Date().toISOString(),
                     sender: this.nickname,
                     id: uuidv4()
-                });
+                } as BaseMessage);
                 break;
 
             case MessageType.ERROR:
-                console.log(`\n[Error] ${(msg as any).payload?.message || ''}`);
+                this.addError(`[Error] ${(msg as any).payload?.message || ''}`);
                 break;
 
-            case MessageType.VERIFY_OK:
+            case MessageType.VERIFY_OK: {
                 const vOk = msg as VerifyOkMessage;
-                console.log('验证码已发送，请检查你的邮箱');
                 if (vOk.payload.action === 'reset') {
-                    // 找回密码流程
-                    this.rl.question('请输入验证码: ', (code) => {
-                        this.rl.question('请输入新密码: ', (newPassword) => {
-                            const resetMsg: ResetPasswordMessage = {
-                                type: MessageType.RESET_PASSWORD,
-                                payload: {
-                                    email: this.pendingEmail,
-                                    verifyCode: code.trim(),
-                                    newPassword
-                                },
-                                timestamp: new Date().toISOString(),
-                                sender: '',
-                                id: uuidv4()
-                            };
-                            this.send(resetMsg);
-                            this.pendingEmail = '';
-                        });
-                    });
+                    this.authMode = 'forgot_code';
+                    this.setPrompt('验证码: ');
                 } else {
-                    // 注册流程
-                    this.rl.question('请输入验证码: ', (code) => {
-                        this.rl.question('请输入用户名: ', (username) => {
-                            this.rl.question('请输入密码: ', (password) => {
-                                this.rl.question('请输入昵称: ', (nickname) => {
-                                    const registerMsg: RegisterMessage = {
-                                        type: MessageType.REGISTER,
-                                        payload: {
-                                            username: username.trim(),
-                                            password,
-                                            nickname: nickname.trim() || username.trim(),
-                                            email: this.pendingEmail,
-                                            verifyCode: code.trim()
-                                        },
-                                        timestamp: new Date().toISOString(),
-                                        sender: '',
-                                        id: uuidv4()
-                                    };
-                                    this.send(registerMsg);
-                                    this.pendingEmail = '';
-                                });
-                            });
-                        });
-                    });
+                    this.authMode = 'register_code';
+                    this.setPrompt('验证码: ');
                 }
                 break;
+            }
 
             case MessageType.VERIFY_FAIL:
-                console.log('验证码发送失败:', (msg as any).payload?.reason || '未知原因');
+                this.addError('验证码发送失败: ' + ((msg as any).payload?.reason || '未知原因'));
                 this.pendingEmail = '';
                 this.promptAuthChoice();
                 break;
 
-            case MessageType.RESET_PASSWORD_OK:
+            case MessageType.RESET_PASSWORD_OK: {
                 const resetOk = msg as ResetPasswordOkMessage;
-                console.log(`✅ ${resetOk.payload.message} (${resetOk.payload.username})`);
-                console.log('请使用新密码重新登录');
+                this.addMessage(`${resetOk.payload.message} (${resetOk.payload.username})`);
+                this.addMessage('请使用新密码重新登录');
                 this.promptAuthChoice();
                 break;
+            }
 
-            case MessageType.RESET_PASSWORD_FAIL:
+            case MessageType.RESET_PASSWORD_FAIL: {
                 const resetFail = msg as ResetPasswordFailMessage;
-                console.log('❌ 重置密码失败:', resetFail.payload.reason);
+                this.addError('重置密码失败: ' + resetFail.payload.reason);
                 this.promptAuthChoice();
                 break;
+            }
 
             default:
                 break;
         }
-
-        // 如果正在聊天模式且收到展示类消息，恢复输入提示符
-        if (this.chatStarted) {
-            switch (msg.type) {
-                case MessageType.CHAT:
-                case MessageType.WHISPER:
-                case MessageType.SYSTEM:
-                case MessageType.PRESENCE:
-                case MessageType.ERROR:
-                case MessageType.HISTORY_DATA:
-                    this.redrawInputLine();
-                    break;
-            }
-        }
     }
+
+    // ==================== 工具方法 ====================
 
     private send(msg: BaseMessage): void {
         this.socket.write(JSON.stringify(msg) + '\n');

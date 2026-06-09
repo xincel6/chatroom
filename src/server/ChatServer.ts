@@ -5,6 +5,7 @@ import {
     BaseMessage, MessageType, AuthMessage, ChatMessage, WhisperMessage, JoinMessage,
     isAuthMessage, isChatMessage, isJoinMessage, isPongMessage, isWhisperMessage,
     isRegisterMessage, isLoginMessage, isTokenMessage, isHistoryMessage, isSendVerifyMessage, isResetPasswordMessage,
+    isListMessage, UserListMessage,
     RegisterMessage, LoginMessage, TokenMessage, HistoryMessage, SendVerifyMessage, ResetPasswordMessage
 } from '../shared/protocol';
 import { v4 as uuidv4 } from 'uuid';
@@ -167,6 +168,8 @@ export class ChatServer {
             user.recordPong();
         } else if (isWhisperMessage(msg)) {
             await this.handleWhisper(user, msg as WhisperMessage);
+        } else if (isListMessage(msg)) {
+            this.handleList(user, msg);
         } else if (isHistoryMessage(msg)) {
             this.handleHistory(user, msg as HistoryMessage);
         } else if (msg.type === MessageType.COMMAND) {
@@ -801,6 +804,51 @@ export class ChatServer {
             sender: 'system',
             id: uuidv4()
         } as BaseMessage);
+    }
+
+    /** 处理在线用户列表请求 */
+    private handleList(user: User, msg: BaseMessage): void {
+        const payload = msg.payload as any;
+        const targetRoom = payload.room as string | undefined;
+
+        const userList: { nickname: string; room: string; status: string }[] = [];
+
+        if (targetRoom) {
+            const room = this.rooms.get(targetRoom);
+            if (room) {
+                for (const nickname of room.getUserList()) {
+                    const u = this.nicknames.get(nickname);
+                    if (u && u.isAuthenticated) {
+                        userList.push({
+                            nickname: u.nickname,
+                            room: u.currentRoom || targetRoom,
+                            status: u.isMuted() ? 'muted' : 'online'
+                        });
+                    }
+                }
+            }
+            userList.sort((a, b) => a.nickname.localeCompare(b.nickname));
+        } else {
+            for (const [, u] of this.nicknames) {
+                if (u.isAuthenticated) {
+                    userList.push({
+                        nickname: u.nickname,
+                        room: u.currentRoom || '',
+                        status: u.isMuted() ? 'muted' : 'online'
+                    });
+                }
+            }
+            userList.sort((a, b) => a.nickname.localeCompare(b.nickname));
+        }
+
+        const response: UserListMessage = {
+            type: MessageType.USER_LIST,
+            payload: { users: userList },
+            timestamp: new Date().toISOString(),
+            sender: 'system',
+            id: uuidv4()
+        };
+        user.sendMessage(response as BaseMessage);
     }
 
     private handleDisconnect(socket: Socket): void {
