@@ -5,7 +5,6 @@ export class EmailService {
 
     constructor() {
         const emailHost = process.env.CHAT_EMAIL_HOST || '';
-        // CHAT_EMAIL_HOST 可能是邮箱地址（如 xxx@qq.com），也可能是 SMTP 服务器地址
         const isEmail = emailHost.includes('@');
         const authUser = isEmail ? emailHost : (process.env.CHAT_EMAIL_USER || '');
         const smtpHost = isEmail ? 'smtp.qq.com' : (emailHost || 'smtp.qq.com');

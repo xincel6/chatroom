@@ -20,6 +20,8 @@ export class ChatClient {
     private token: string = '';
     private lastHistoryId: number | null = null;
     private pendingEmail: string = ''; // 注册时暂存邮箱
+    private inputBuffer: string = '';
+    private promptText: string = '';
 
     constructor(host: string, port: number) {
         this.socket = createConnection({ host, port });
@@ -198,43 +200,111 @@ export class ChatClient {
         this.chatStarted = true;
         this.firstMenu();
 
-        this.rl.setPrompt(`${this.nickname}[${this.currentRoom}]> `);
-        //这行代码用到了 readline 模块的 setPrompt 方法，设
-        // 置了用户输入提示符的格式为 "昵称[当前房间]> "，
-        // 以便用户在输入消息时能够清楚地看到自己当前的身份和所在的房间。
-        this.rl.prompt();
-        //每次都是触发这个提示符，并且rlon监听器会一直监听用户输入，直到用户退出或者连接断开
+        this.promptText = `${this.nickname}[${this.currentRoom}]> `;
+        this.inputBuffer = '';
 
-        this.rl.on('line', (input) => {
-            //每当用户输入一行文本并按下回车键时，这个事件处理器就会被触发，接收用户输入的内容作为参数进行处理。
-            const line = input.trim();
-            // 这里的逻辑是先检查用户输入是否以 '/' 开头，如果是，则将其视为命令并调用 handleCommand 方法进行处理；
-            // 否则，将其视为普通聊天消息，构造一个 ChatMessage 对象并发送给服务器。
-            if (!line) {
-                this.rl.prompt();
+        // 移除原有的 line 事件监听，防止和 keypress 冲突
+        this.rl.removeAllListeners('line');
+
+        // 启用 keypress 事件
+        readline.emitKeypressEvents(process.stdin);
+        if (process.stdin.isTTY) {
+            process.stdin.setRawMode(true);
+        }
+
+        this.setupKeypressHandler();
+        this.redrawInputLine();
+    }
+
+    private setupKeypressHandler(): void {
+        process.stdin.on('keypress', (str, key) => {
+            // 处理 Ctrl+C
+            if (key.sequence === '\u0003') {
+                process.exit(0);
+            }
+
+            // 回车发送
+            if (key.name === 'return' || key.name === 'enter') {
+                const content = this.inputBuffer;
+                this.inputBuffer = '';
+                this.clearInputLines();
+                this.handleUserInput(content);
                 return;
-                // 如果用户输入为空行，则直接重新显示提示符，等待下一次输入，而不进行任何处理。
             }
 
-            if (line.startsWith('/')) {
-                const needPrompt = this.handleCommand(line);
-                if (needPrompt) this.rl.prompt();
-            } else {
-                // 普通聊天
-                const msg: ChatMessage = {
-                    type: MessageType.CHAT,
-                    payload: {
-                        content: line,
-                        room: this.currentRoom
-                    },
-                    timestamp: new Date().toISOString(),
-                    sender: this.nickname,
-                    id: uuidv4()
-                };
-                this.send(msg);
-                this.rl.prompt();
+            // 退格
+            if (key.name === 'backspace') {
+                this.inputBuffer = this.inputBuffer.slice(0, -1);
+            } else if (str && !key.ctrl && !key.meta) {
+                // 普通字符输入
+                this.inputBuffer += str;
             }
+
+            // 每次按键后清行重绘
+            this.redrawInputLine();
         });
+    }
+
+    private handleUserInput(line: string): void {
+        if (!line) {
+            this.redrawInputLine();
+            return;
+        }
+
+        if (line.startsWith('/')) {
+            const needPrompt = this.handleCommand(line);
+            if (!needPrompt) return;
+        } else {
+            // 普通聊天
+            const msg: ChatMessage = {
+                type: MessageType.CHAT,
+                payload: {
+                    content: line,
+                    room: this.currentRoom
+                },
+                timestamp: new Date().toISOString(),
+                sender: this.nickname,
+                id: uuidv4()
+            };
+            this.send(msg);
+        }
+        this.redrawInputLine();
+    }
+
+    private redrawInputLine(): void {
+        const prompt = this.promptText;
+        const fullText = prompt + this.inputBuffer;
+        const terminalWidth = process.stdout.columns || 80;
+
+        // 计算当前输入占用了多少行
+        const lines = Math.ceil(fullText.length / terminalWidth) || 1;
+
+        // 光标回到当前输入的第一行开头
+        process.stdout.write('\r');
+
+        // 从最后一行开始，逐行上移并清除
+        for (let i = 1; i < lines; i++) {
+            process.stdout.write('\x1b[1A'); // 上移一行
+            process.stdout.write('\x1b[K');  // 清除该行
+        }
+        // 回到第一行并清除
+        process.stdout.write('\x1b[K');
+
+        // 重新输出提示符 + 当前缓冲区内容
+        process.stdout.write(prompt + this.inputBuffer);
+    }
+
+    private clearInputLines(): void {
+        const prompt = this.promptText;
+        const fullText = prompt + this.inputBuffer;
+        const terminalWidth = process.stdout.columns || 80;
+        const lines = Math.ceil(fullText.length / terminalWidth) || 1;
+
+        process.stdout.write('\r');
+        for (let i = 1; i < lines; i++) {
+            process.stdout.write('\x1b[1A\x1b[K');
+        }
+        process.stdout.write('\x1b[K');
     }
 
     private handleCommand(line: string): boolean {
@@ -469,7 +539,7 @@ export class ChatClient {
                 }
                 const roomName = parts[1];
                 this.currentRoom = roomName;
-                this.rl.setPrompt(`${this.nickname}[${this.currentRoom}]> `);
+                this.promptText = `${this.nickname}[${this.currentRoom}]> `;
                 //重新设计置提示符以反映当前房间的变化
                 const join: JoinMessage = {
                     type: MessageType.JOIN,
@@ -518,6 +588,15 @@ export class ChatClient {
     }
 
     private handleMessage(msg: BaseMessage): void {
+        const needPreserveInput = this.chatStarted && [
+            MessageType.CHAT, MessageType.WHISPER, MessageType.SYSTEM,
+            MessageType.PRESENCE, MessageType.ERROR, MessageType.HISTORY_DATA
+        ].includes(msg.type);
+
+        if (needPreserveInput) {
+            this.clearInputLines();
+        }
+
         //直接枚举消息类型跳转到对应的处理逻辑，保持代码清晰和可维护
         switch (msg.type) {
             case MessageType.AUTH_OK:
@@ -693,7 +772,7 @@ export class ChatClient {
                 break;
         }
 
-        // 如果正在聊天模式且收到展示类消息，恢复 readline 提示符
+        // 如果正在聊天模式且收到展示类消息，恢复输入提示符
         if (this.chatStarted) {
             switch (msg.type) {
                 case MessageType.CHAT:
@@ -702,7 +781,7 @@ export class ChatClient {
                 case MessageType.PRESENCE:
                 case MessageType.ERROR:
                 case MessageType.HISTORY_DATA:
-                    this.rl.prompt();
+                    this.redrawInputLine();
                     break;
             }
         }
